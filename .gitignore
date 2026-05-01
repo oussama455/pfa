@@ -1,0 +1,50 @@
+# Environnements virtuels
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# Modèles et poids lourds (à ne pas committer)
+*.pth
+*.pt
+*.h5
+*.onnx
+*.ckpt
+models/
+
+# Données brutes et résultats volumineux
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Repos externes clonés
+external/*
+!external/.gitkeep
+
+# Django
+*.sqlite3
+*.sqlite3-journal
+webapp/media/
+webapp/staticfiles/
+local_settings.py
+.env
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini

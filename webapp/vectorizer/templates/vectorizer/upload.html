@@ -1,0 +1,48 @@
+{% extends 'vectorizer/base.html' %}
+
+{% block content %}
+<div class="card">
+  <h2>Téléverser une carte</h2>
+  <p class="muted">
+    Formats supportés : PNG, JPG, TIFF. La carte sera prétraitée puis vectorisée
+    automatiquement (hydrographie, végétation, courbes de niveau, routes).
+  </p>
+  <form method="post" enctype="multipart/form-data">
+    {% csrf_token %}
+    {% for field in form %}
+      <div class="form-group">
+        <label for="{{ field.id_for_label }}">{{ field.label }}</label>
+        {{ field }}
+        {% if field.errors %}<div style="color:#991b1b; font-size:13px;">{{ field.errors }}</div>{% endif %}
+      </div>
+    {% endfor %}
+    <button type="submit">Lancer la vectorisation</button>
+  </form>
+</div>
+
+{% if recent %}
+<div class="card">
+  <h2>Traitements récents</h2>
+  <table>
+    <thead>
+      <tr>
+        <th>Titre</th>
+        <th>Statut</th>
+        <th>Date</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for item in recent %}
+      <tr>
+        <td>{{ item.title }}</td>
+        <td><span class="status {{ item.status }}">{{ item.get_status_display }}</span></td>
+        <td class="muted">{{ item.created_at|date:"d/m/Y H:i" }}</td>
+        <td><a href="{{ item.get_absolute_url }}" class="btn btn-secondary">Voir</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+{% endblock %}
