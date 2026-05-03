@@ -1,6 +1,6 @@
 # PFA — Agent IA de vectorisation de cartes militaires
 
-**Étudiant :** Mohamed GHARBI — Géomatique 2ᵉ année
+**Étudiant :** Géomatique 2ᵉ année
 **Encadrant :** Kamel BENRAIS — Ingénieur Principal, ELFOULADH
 **École :** EABA — Tunisie
 
@@ -15,7 +15,7 @@
 Ce projet **n'est pas** une réécriture de modèles de deep learning depuis zéro.
 Il **assemble** des briques open source éprouvées dans un pipeline cohérent, exposé via une interface Django.
 
-Pour le détail de la stratégie et de l'architecture, voir le document de cadrage : [`PFA_Cadrage_Mohamed_GHARBI.docx`](./PFA_Cadrage_Mohamed_GHARBI.docx).
+
 
 ---
 
@@ -122,7 +122,7 @@ Si tu n'as pas envie de te battre avec Anaconda + Windows DLLs, ouvre les notebo
 2. Va sur [colab.research.google.com](https://colab.research.google.com/).
 3. **File > Upload notebook** → sélectionne `notebooks/01_color_segmentation_demo.ipynb`.
 4. Active la GPU : **Exécution > Modifier le type d'exécution > T4 GPU**.
-5. Dans la première cellule du notebook, mets ton `REPO_URL` (par exemple `https://github.com/Mohamed-GHARBI/pfa.git`).
+5. Dans la première cellule du notebook
 6. Lance les cellules dans l'ordre. La cellule de Setup pip-install les dépendances et clone ton repo automatiquement.
 
 **3 façons de fournir tes données dans Colab** :
@@ -282,6 +282,4 @@ Toutes compatibles avec un projet académique et une réutilisation du code.
 
 ---
 
-## Contact
 
-Pour toute question sur le projet : cristoumohamedgharbi@gmail.com
