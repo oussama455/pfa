@@ -1,0 +1,7 @@
+{
+"type": "FeatureCollection",
+"name": "roads",
+"features": [
+{ "type": "Feature", "properties": { "layer": "roads" }, "geometry": { "type": "Polygon", "coordinates": [ [ [ 2390.0, 10.0 ], [ 2389.0, 2395.0 ], [ 2390.0, 2395.0 ], [ 2390.0, 10.0 ] ] ] } }
+]
+}

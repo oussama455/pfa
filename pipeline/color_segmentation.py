@@ -57,7 +57,8 @@ class HSVRange:
 DEFAULT_RANGES: Dict[str, HSVRange] = {
     "water":      HSVRange(h_min=95,  s_min=60, v_min=60,  h_max=130, s_max=255, v_max=255),
     "vegetation": HSVRange(h_min=40,  s_min=40, v_min=50,  h_max=85,  s_max=255, v_max=255),
-    "contours":   HSVRange(h_min=8,   s_min=70, v_min=60,  h_max=22,  s_max=220, v_max=210),
+    # Modifié ici : S min à 30 pour le brun dilué et H max à 30
+    "contours":   HSVRange(h_min=15,  s_min=30, v_min=80,  h_max=30,  s_max=100, v_max=255),
 }
 
 

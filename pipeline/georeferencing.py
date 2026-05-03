@@ -189,3 +189,39 @@ def save_gcps_json(gcps: List[GCP], path: str | Path) -> Path:
     return path
 
 
+def load_gcps_json(path: str | Path) -> List[GCP]:
+    """Recharge une liste de GCPs depuis un JSON."""
+    import json
+    with open(path, "r", encoding="utf-8") as f:
+        payload = json.load(f)
+    return [GCP(**item) for item in payload]
+
+
+# ---------------------------------------------------------------------
+# Exemple d'utilisation
+# ---------------------------------------------------------------------
+# # 1) Saisie une seule fois des 4 coins de TA carte (lus directement sur
+# #    le cadre — degrés/minutes/secondes convertis en degrés décimaux).
+# corners = CornerCoords(
+#     top_left     = (10.0000, 37.0000),   # NW
+#     top_right    = (10.5000, 37.0000),   # NE
+#     bottom_right = (10.5000, 36.7500),   # SE
+#     bottom_left  = (10.0000, 36.7500),   # SW
+# )
+#
+# # 2a) Variante simple (4 coins seulement) :
+# from pipeline.preprocessing import detect_map_frame, load_image
+# img = load_image("data/raw/carte_test.png")
+# bbox = detect_map_frame(img)
+# gcps = gcps_from_corners(bbox, corners, n_samples=5)
+#
+# # 2b) Variante précise (quadrillage détecté) :
+# from pipeline.grid_extraction import detect_grid_lines, grid_intersections
+# det = detect_grid_lines(img, grid_color="dark")
+# pts = grid_intersections(det)
+# gcps = gcps_from_grid_intersections(pts, bbox, corners)
+#
+# tf = compute_transform(gcps)
+# write_world_file("data/raw/carte_test.png", tf)
+# save_gcps_json(gcps, "data/raw/carte_test_gcps.json")
+

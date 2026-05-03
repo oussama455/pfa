@@ -11,29 +11,59 @@ import os
 import sys
 from pathlib import Path
 
-CONDA_PREFIX = r'C:\Users\ochou\anaconda3\envs\geo'
-GDAL_BIN = os.path.join(CONDA_PREFIX, 'Library', 'bin')
+# Charge les variables d'environnement depuis webapp/.env (silencieux si absent)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(Path(__file__).resolve().parent.parent / '.env')
+except ImportError:
+    pass  # python-dotenv non installé — les variables système sont utilisées directement
 
-# Add GDAL bin directory so dependent DLLs are found correctly.
-os.add_dll_directory(GDAL_BIN)
-os.environ['PATH'] = GDAL_BIN + os.path.pathsep + os.environ['PATH']
+# ---------------------------------------------------------------------------
+# GDAL / GEOS — Windows uniquement
+# Sur Linux/macOS ces librairies sont trouvées automatiquement via conda-forge
+# ou les packages système ; ce bloc est ignoré hors Windows.
+#
+# Sur Windows, définir la variable d'environnement CONDA_ENV_PATH dans un
+# fichier .env (copier .env.example et adapter) ou dans le shell avant de
+# lancer Django.
+#
+# Exemple .env :
+#   CONDA_ENV_PATH=C:\Users\TonNom\anaconda3\envs\pfa
+# ---------------------------------------------------------------------------
+if os.name == 'nt':  # Windows seulement
+    _conda_env = os.environ.get(
+        'CONDA_ENV_PATH',
+        r'C:\Users\ochou\anaconda3\envs\geo'   # fallback local (dev machine)
+    )
+    GDAL_BIN = os.path.join(_conda_env, 'Library', 'bin')
 
-# Auto-detect GDAL DLL name (e.g., gdal.dll, gdal310.dll) to avoid hardcoded version issues.
-gdal_files = [f for f in os.listdir(GDAL_BIN) if f.startswith('gdal') and f.endswith('.dll')]
-if gdal_files:
-    GDAL_LIBRARY_PATH = os.path.join(GDAL_BIN, gdal_files[0])
-else:
-    GDAL_LIBRARY_PATH = os.path.join(GDAL_BIN, 'gdal.dll')
+    if os.path.isdir(GDAL_BIN):
+        os.add_dll_directory(GDAL_BIN)
+        os.environ['PATH'] = GDAL_BIN + os.path.pathsep + os.environ['PATH']
 
-GEOS_LIBRARY_PATH = os.path.join(GDAL_BIN, 'geos_c.dll')
+        gdal_files = [f for f in os.listdir(GDAL_BIN)
+                      if f.startswith('gdal') and f.endswith('.dll')]
+        GDAL_LIBRARY_PATH = os.path.join(GDAL_BIN, gdal_files[0] if gdal_files else 'gdal.dll')
+        GEOS_LIBRARY_PATH = os.path.join(GDAL_BIN, 'geos_c.dll')
+    else:
+        import warnings
+        warnings.warn(
+            f"GDAL_BIN introuvable : {GDAL_BIN}\n"
+            "Définir CONDA_ENV_PATH dans .env ou en variable d'environnement.",
+            RuntimeWarning,
+            stacklevel=1,
+        )
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = BASE_DIR.parent  # racine du dépôt (pfa/)
 
 # ------------------------------------------------------------
 # Sécurité
 # ------------------------------------------------------------
-SECRET_KEY = 'dev-only-change-me-in-production-0123456789abcdef'
-DEBUG = True
+SECRET_KEY = os.environ.get(
+    'SECRET_KEY',
+    'dev-only-change-me-in-production-0123456789abcdef'
+)
+DEBUG = os.environ.get('DEBUG', 'True').lower() not in ('false', '0', 'no')
 ALLOWED_HOSTS = ['localhost', '127.0.0.1']
 
 
