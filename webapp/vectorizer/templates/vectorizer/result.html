@@ -1,0 +1,122 @@
+{% extends 'vectorizer/base.html' %}
+{% load leaflet_tags %}
+
+{% block extra_head %}
+  {% leaflet_js %}
+  {% leaflet_css %}
+{% endblock %}
+
+{% block content %}
+<div class="card">
+  <div style="display:flex; justify-content:space-between; align-items:center;">
+    <div>
+      <h2 style="margin-bottom:4px;">{{ upload.title }}</h2>
+      <div class="muted">
+        Téléversée le {{ upload.created_at|date:"d/m/Y à H:i" }} ·
+        <span class="status {{ upload.status }}" id="status-pill">{{ upload.get_status_display }}</span>
+      </div>
+    </div>
+    <div>
+      <a href="{% url 'vectorizer:upload' %}" class="btn btn-secondary">← Nouvelle carte</a>
+    </div>
+  </div>
+</div>
+
+{% if upload.status == 'error' %}
+<div class="card" style="border-color:#f87171;">
+  <h2 style="color:#991b1b;">Erreur</h2>
+  <pre style="white-space:pre-wrap; font-size:13px; color:#991b1b;">{{ upload.error_message }}</pre>
+</div>
+{% endif %}
+
+<div class="card">
+  <h2>Visualisation</h2>
+  {% leaflet_map "resultmap" callback="window.map_init" %}
+</div>
+
+<div class="card">
+  <h2>Couches extraites</h2>
+  <div id="layers-list">
+    {% if layers %}
+    <table>
+      <thead><tr><th>Couche</th><th>Fichier GeoJSON</th></tr></thead>
+      <tbody>
+        {% for name, url in layers.items %}
+        <tr>
+          <td><strong>{{ name }}</strong></td>
+          <td><a href="{{ url }}" download>{{ url }}</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <p class="muted">Traitement en cours… Cette liste se remplira automatiquement.</p>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_body %}
+<script>
+  const STATUS_URL = "{% url 'vectorizer:status' upload.pk %}";
+  let leafletMap = null;
+  const layerGroups = {};
+
+  window.map_init = function (map, options) {
+    leafletMap = map;
+    loadLayers({{ layers|safe }});
+  };
+
+  // Couleurs par type de couche
+  const COLORS = {
+    water:      { color: '#0077cc', fillColor: '#3399ff' },
+    vegetation: { color: '#2d7a2d', fillColor: '#66cc66' },
+    contours:   { color: '#a0522d', fillColor: '#a0522d' },
+    red_roads:  { color: '#cc0000', fillColor: '#ff3333' },
+    roads:      { color: '#333333', fillColor: '#666666' },
+    buildings:  { color: '#666666', fillColor: '#aaaaaa' },
+  };
+
+  function loadLayers(layers) {
+    if (!leafletMap) return;
+    Object.entries(layers || {}).forEach(([name, url]) => {
+      if (layerGroups[name]) return;  // déjà chargée
+      const style = COLORS[name] || { color: '#ff8800', fillColor: '#ffaa44' };
+      fetch(url)
+        .then(r => r.json())
+        .then(geojson => {
+          const layer = L.geoJSON(geojson, {
+            style: { ...style, weight: 2, fillOpacity: 0.4 },
+          }).addTo(leafletMap);
+          layerGroups[name] = layer;
+          if (Object.keys(layerGroups).length === 1) {
+            try { leafletMap.fitBounds(layer.getBounds()); } catch (e) {}
+          }
+        })
+        .catch(err => console.warn('Layer', name, 'load error', err));
+    });
+  }
+
+  // Polling du statut tant que le traitement est en cours
+  const currentStatus = "{{ upload.status }}";
+  if (currentStatus === 'pending' || currentStatus === 'processing') {
+    const poll = setInterval(() => {
+      fetch(STATUS_URL).then(r => r.json()).then(data => {
+        const pill = document.getElementById('status-pill');
+        pill.className = 'status ' + data.status;
+        pill.textContent = data.status_label;
+        if (data.status === 'done' || data.status === 'error') {
+          clearInterval(poll);
+          if (data.status === 'done') {
+            loadLayers(data.layers);
+            // Rafraîchit la liste des fichiers
+            setTimeout(() => window.location.reload(), 800);
+          } else {
+            window.location.reload();
+          }
+        }
+      });
+    }, 2000);
+  }
+</script>
+{% endblock %}

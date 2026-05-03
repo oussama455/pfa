@@ -1,0 +1,50 @@
+# ===========================
+# PFA — Agent IA vectorisation
+# ===========================
+# Python 3.10+ recommandé
+
+# --- Calcul scientifique ---
+numpy>=1.26
+scipy>=1.11
+
+# --- Vision par ordinateur classique ---
+opencv-python>=4.9
+scikit-image>=0.22
+Pillow>=10.2
+
+# --- Deep learning (U-Net pour routes/bâtiments) ---
+# Installe d'abord PyTorch avec CUDA selon ton GPU :
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+torch>=2.2
+torchvision>=0.17
+segmentation-models-pytorch>=0.3.3
+albumentations>=1.4
+
+# --- Géomatique : raster ---
+rasterio>=1.3
+# GDAL doit être installé au niveau système (voir README)
+
+# --- Géomatique : vecteur ---
+shapely>=2.0
+geopandas>=0.14
+fiona>=1.9
+pyproj>=3.6
+
+# --- Framework web ---
+Django>=5.0
+django-leaflet>=0.30
+django-geojson>=4.0
+
+# --- Notebook et exploration ---
+jupyter>=1.0
+matplotlib>=3.8
+ipywidgets>=8.1
+
+# --- Utilitaires ---
+tqdm>=4.66
+python-dotenv>=1.0
+pyyaml>=6.0
+
+# --- Tests ---
+pytest>=8.0
+pytest-django>=4.8
