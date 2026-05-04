@@ -28,7 +28,7 @@ except ImportError:
 # lancer Django.
 #
 # Exemple .env :
-#   CONDA_ENV_PATH=C:\Users\TonNom\anaconda3\envs\pfa
+#   CONDA_ENV_PATH=C:\Users\TonNom\anaconda3\envs\geo
 # ---------------------------------------------------------------------------
 if os.name == 'nt':  # Windows seulement
     _conda_env = os.environ.get(
@@ -53,6 +53,7 @@ if os.name == 'nt':  # Windows seulement
             RuntimeWarning,
             stacklevel=1,
         )
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = BASE_DIR.parent  # racine du dépôt (pfa/)
 
@@ -164,4 +165,3 @@ LEAFLET_CONFIG = {
 
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
-

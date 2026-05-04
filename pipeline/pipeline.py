@@ -4,6 +4,13 @@ Orchestrateur bout-en-bout du pipeline de vectorisation.
 Modifications apportées :
     - Déplacement de 'red_roads' vers une vectorisation par squelettisation (lignes).
     - Optimisation de l'étape 5 pour séparer polygones et polylignes.
+
+Usage typique (Python) :
+    from pipeline.pipeline import run_pipeline
+    result = run_pipeline("data/raw/carte.png", output_dir="data/processed")
+
+Usage CLI :
+    python -m pipeline.pipeline data/raw/carte.png -o data/processed
 """
 from __future__ import annotations
 
@@ -14,7 +21,7 @@ from pathlib import Path
 from typing import Dict, List, Optional
 
 import numpy as np
-from skimage.morphology import skeletonize  # Requis pour les routes rouges
+from skimage.morphology import skeletonize
 
 from . import preprocessing as prep
 from . import color_segmentation as colseg
@@ -48,12 +55,27 @@ def run_pipeline(input_path: str | Path,
                  verbose: bool = True) -> PipelineResult:
     """
     Pipeline complet : raster → GeoJSON par couche.
+
+    Arguments :
+        input_path : carte raster (PNG, TIFF, JPG).
+        output_dir : dossier de sortie pour les GeoJSON.
+        gcps       : points de contrôle pour géoréférencer (optionnel).
+        crs        : code EPSG des coordonnées des GCPs.
+        with_semantic : si True, ajoute la segmentation U-Net
+                        (nécessite pipeline.semantic_segmentation + poids).
+        unet_weights : chemin vers les poids U-Net (.pth).
+        auto_crop  : détecte et recadre automatiquement la zone cartographique
+                     (exclut la légende et les marges). Défaut : True.
+        manual_bbox : (x1, y1, x2, y2) pour forcer un recadrage manuel.
+                      Prime sur auto_crop si fourni.
+        device     : 'cuda', 'cpu' ou None (auto). Si None, GPU si dispo
+                     sinon CPU. Utilise device='cpu' pour comparer / debug.
     """
     input_path = Path(input_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1) Prétraitement + recadrage cadre cartographique[cite: 5]
+    # 1) Prétraitement + recadrage cadre cartographique
     if verbose:
         print(f"[1/5] Prétraitement : {input_path}")
     image_bgr, image_hsv, crop_bbox = prep.preprocess_with_crop(
@@ -63,19 +85,31 @@ def run_pipeline(input_path: str | Path,
     )
     if verbose:
         x1, y1, x2, y2 = crop_bbox
-        print(f"       Cadre cartographique : ({x1}, {y1}) → ({x2}, {y2})")
+        print(f"       Cadre cartographique : ({x1}, {y1}) → ({x2}, {y2}) "
+              f"= {x2 - x1} × {y2 - y1} px")
 
-    # 2) Segmentation par couleur[cite: 5]
+    # 2) Segmentation par couleur
     if verbose:
         print("[2/5] Segmentation par couleur (OpenCV)")
     color_masks = colseg.extract_all_color_layers(image_hsv)
+    if verbose:
+        for name, mask in color_masks.items():
+            print(f"       {name:12s} → {colseg.coverage_percent(mask):5.2f}% des pixels")
 
-    # 3) Segmentation sémantique (optionnelle)[cite: 5]
+    # 3) Segmentation sémantique (optionnelle) — auto GPU sinon CPU
     semantic_masks: Dict[str, np.ndarray] = {}
     if with_semantic:
-        from . import semantic_segmentation as semseg
-        chosen_device = device if device else semseg.get_device(verbose=verbose)
-        model = semseg.build_unet(encoder_name="resnet34", classes=3, device=chosen_device)
+        from . import semantic_segmentation as semseg  # import lazy
+        if device is None:
+            chosen_device = semseg.get_device(verbose=verbose)
+        else:
+            chosen_device = device
+            if verbose:
+                print(f"  Device forcé : {chosen_device}")
+        if verbose:
+            print(f"[3/5] Segmentation sémantique (U-Net) sur {chosen_device.upper()}")
+        model = semseg.build_unet(encoder_name="resnet34", classes=3,
+                                  device=chosen_device)
         if unet_weights:
             model = semseg.load_weights(model, unet_weights, device=chosen_device)
         image_rgb = prep.to_rgb(image_bgr)
@@ -84,23 +118,26 @@ def run_pipeline(input_path: str | Path,
             class_names=["roads", "buildings"],
             device=chosen_device,
         )
+    elif verbose:
+        print("[3/5] Segmentation sémantique : sautée (with_semantic=False)")
 
-    # 4) Géoréférencement[cite: 5]
+    # 4) Géoréférencement
     transform = None
     if gcps:
         if verbose:
             print(f"[4/5] Géoréférencement ({len(gcps)} GCPs)")
         transform = geo.compute_transform(gcps)
+    elif verbose:
+        print("[4/5] Géoréférencement : sautée (pas de GCPs)")
 
-    # 5) Vectorisation et export[cite: 5]
+    # 5) Vectorisation et export
     if verbose:
         print("[5/5] Vectorisation et export GeoJSON")
     layers_out: Dict[str, str] = {}
     counts: Dict[str, int] = {}
 
     # --- A. POLYGONES (Eau, Végétation) ---
-    # On a retiré 'red_roads' de cette liste[cite: 5]
-    poly_layers = ["water", "vegetation"] 
+    poly_layers = ["water", "vegetation"]
     for name in poly_layers:
         mask = color_masks.get(name)
         if mask is None:
@@ -114,8 +151,7 @@ def run_pipeline(input_path: str | Path,
         layers_out[name] = str(out_path)
         counts[name] = len(polys)
 
-    # --- B. POLYLIGNES (Squelettisation) ---
-    # Traitement spécifique pour les routes rouges
+    # --- B. POLYLIGNES par squelettisation (Routes rouges + Courbes de niveau) ---
     red_road_mask = color_masks.get("red_roads")
     if red_road_mask is not None and red_road_mask.any():
         skeleton = skeletonize(red_road_mask > 0)
@@ -127,18 +163,18 @@ def run_pipeline(input_path: str | Path,
             layers_out["red_roads"] = str(out_path)
             counts["red_roads"] = len(lines)
 
-    # Courbes de niveau (déjà gérées en squelette par colseg)[cite: 4, 5]
     contour_mask = color_masks.get("contours")
     if contour_mask is not None and contour_mask.any():
         lines = vec.skeleton_to_lines(contour_mask, transform=transform)
         if lines:
-            gdf = vec.to_geodataframe(lines, layer_name="contours", crs=crs if transform else None)
+            gdf = vec.to_geodataframe(lines, layer_name="contours",
+                                      crs=crs if transform else None)
             out_path = output_dir / "contours.geojson"
             vec.save_geojson(gdf, out_path)
             layers_out["contours"] = str(out_path)
             counts["contours"] = len(lines)
 
-    # --- C. SÉMANTIQUE (Bâtiments, etc.) ---[cite: 5]
+    # --- C. SÉMANTIQUE (Bâtiments, Routes IA) ---
     for name, mask in semantic_masks.items():
         polys = vec.mask_to_polygons(mask, transform=transform)
         if not polys:
@@ -162,13 +198,27 @@ def run_pipeline(input_path: str | Path,
     return result
 
 
+# ---------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------
 def main():
     parser = argparse.ArgumentParser(description="Pipeline de vectorisation de cartes")
-    parser.add_argument("input", help="Chemin vers la carte raster")
-    parser.add_argument("-o", "--output", default="data/processed", help="Dossier de sortie")
-    parser.add_argument("--semantic", action="store_true", help="Active U-Net")
-    parser.add_argument("--weights", default=None, help="Poids U-Net (.pth)")
-    parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto")
+    parser.add_argument("input", help="Chemin vers la carte raster (PNG/TIF/JPG)")
+    parser.add_argument("-o", "--output", default="data/processed",
+                        help="Dossier de sortie (défaut : data/processed)")
+    parser.add_argument("--semantic", action="store_true",
+                        help="Active la segmentation sémantique U-Net")
+    parser.add_argument("--weights", default=None,
+                        help="Chemin vers les poids U-Net (.pth)")
+    parser.add_argument("--no-auto-crop", action="store_true",
+                        help="Désactive la détection auto du cadre cartographique")
+    parser.add_argument("--bbox", type=int, nargs=4, metavar=("X1", "Y1", "X2", "Y2"),
+                        default=None,
+                        help="Recadrage manuel : x1 y1 x2 y2 (en pixels)")
+    parser.add_argument("--device", choices=["auto", "cuda", "cpu"], default="auto",
+                        help="Device pour la segmentation U-Net "
+                             "(auto = GPU si dispo sinon CPU)")
+    parser.add_argument("-q", "--quiet", action="store_true")
     args = parser.parse_args()
 
     run_pipeline(
@@ -176,7 +226,10 @@ def main():
         args.output,
         with_semantic=args.semantic,
         unet_weights=args.weights,
+        auto_crop=not args.no_auto_crop,
+        manual_bbox=tuple(args.bbox) if args.bbox else None,
         device=None if args.device == "auto" else args.device,
+        verbose=not args.quiet,
     )
 
 

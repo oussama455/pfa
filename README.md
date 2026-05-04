@@ -15,7 +15,7 @@
 Ce projet **n'est pas** une réécriture de modèles de deep learning depuis zéro.
 Il **assemble** des briques open source éprouvées dans un pipeline cohérent, exposé via une interface Django.
 
-Pour le détail de la stratégie et de l'architecture, voir le document de cadrage : [`PFA_Cadrage_Mohamed_GHARBI.docx`](./PFA_Cadrage_Mohamed_GHARBI.docx).
+Pour le détail de la stratégie et de l'architecture, voir le document de cadrage : [`PFA_Cadrage_Oussama_Chouaibi.docx`](./PFA_Cadrage_Oussama_Chouaibi.docx).
 
 ---
 
@@ -70,7 +70,7 @@ pfa/
 ├── README.md
 ├── requirements.txt
 ├── .gitignore
-├── PFA_Cadrage_Mohamed_GHARBI.docx   ← document de cadrage
+├── PFA_Cadrage_Oussama_Chouaibi.docx   ← document de cadrage
 │
 ├── pipeline/              ← cœur du traitement (modules Python)
 │   ├── __init__.py

@@ -161,19 +161,34 @@ def gcps_from_corners(bbox_px: tuple[int, int, int, int],
 
 def gcps_from_grid_intersections(intersections_px: np.ndarray,
                                   bbox_px: tuple[int, int, int, int],
-                                  corners: CornerCoords) -> List[GCP]:
+                                  corners: CornerCoords,
+                                  *,
+                                  intersections_in_crop_frame: bool = True) -> List[GCP]:
     """
     À partir des intersections du quadrillage détectées par
     `pipeline.grid_extraction.grid_intersections`, génère un GCP par
     intersection en interpolant ses coordonnées monde depuis les 4 coins.
 
+    intersections_in_crop_frame :
+        True  = les intersections sont en pixels DU CROP (typique après
+                preprocess_with_crop). On les translate vers l'image
+                originale en ajoutant (x1, y1) du bbox.
+        False = les intersections sont déjà en pixels de l'image originale.
+
     Beaucoup plus de points que `gcps_from_corners` → ajustement plus
     précis si la carte a une légère déformation (pliage, scan).
     """
+    x1, y1, _, _ = bbox_px
     gcps = []
     for col, row in intersections_px:
-        x, y = _bilinear_interp(float(col), float(row), bbox_px, corners)
-        gcps.append(GCP(col=float(col), row=float(row), x=x, y=y))
+        if intersections_in_crop_frame:
+            col_orig = float(col) + x1
+            row_orig = float(row) + y1
+        else:
+            col_orig = float(col)
+            row_orig = float(row)
+        x, y = _bilinear_interp(col_orig, row_orig, bbox_px, corners)
+        gcps.append(GCP(col=col_orig, row=row_orig, x=x, y=y))
     return gcps
 
 
@@ -224,4 +239,3 @@ def load_gcps_json(path: str | Path) -> List[GCP]:
 # tf = compute_transform(gcps)
 # write_world_file("data/raw/carte_test.png", tf)
 # save_gcps_json(gcps, "data/raw/carte_test_gcps.json")
-
