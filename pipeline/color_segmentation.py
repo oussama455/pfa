@@ -54,11 +54,15 @@ class HSVRange:
 
 # Defaults plus stricts (saturation min plus élevée pour éviter de prendre
 # le papier crème / jauni des cartes anciennes).
+#
+# IMPORTANT : la range "contours" est volontairement RESTRICTIVE pour éviter
+# l'explosion de features (typiquement 44 → 7000+ si on prend trop large).
+# Sur la carte TUNIS 1:50000, le brun des courbes a S>=70, V<=210.
+# Le papier jauni a S~30 et V~250 → exclu par S_min=70 et V_max=210.
 DEFAULT_RANGES: Dict[str, HSVRange] = {
     "water":      HSVRange(h_min=95,  s_min=60, v_min=60,  h_max=130, s_max=255, v_max=255),
     "vegetation": HSVRange(h_min=40,  s_min=40, v_min=50,  h_max=85,  s_max=255, v_max=255),
-    # S min à 30 pour capturer le brun dilué des courbes sur cartes anciennes
-    "contours":   HSVRange(h_min=15,  s_min=30, v_min=80,  h_max=30,  s_max=100, v_max=255),
+    "contours":   HSVRange(h_min=8,   s_min=70, v_min=60,  h_max=22,  s_max=220, v_max=210),
 }
 
 
@@ -154,6 +158,25 @@ def skeletonize_mask(mask: np.ndarray) -> np.ndarray:
     return skel
 
 
+def filter_skeleton_by_length(skeleton: np.ndarray, *,
+                               min_length_px: int = 30) -> np.ndarray:
+    """
+    Élimine les composantes connexes du squelette plus courtes que
+    `min_length_px` pixels. Évite les milliers de petits fragments (qui
+    transforment 44 vraies courbes en 7000+ features).
+
+    À utiliser APRÈS skeletonize_mask().
+    """
+    binary = (skeleton > 0).astype(np.uint8)
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    out = np.zeros_like(binary)
+    for i in range(1, num):  # 0 = fond
+        # Pour un squelette, l'AIRE = nombre de pixels = longueur approchée
+        if stats[i, cv2.CC_STAT_AREA] >= min_length_px:
+            out[labels == i] = 255
+    return out
+
+
 # -----------------------------------------------------------
 # API haut niveau
 # -----------------------------------------------------------
@@ -163,6 +186,9 @@ def extract_all_color_layers(hsv: np.ndarray, *,
                               dense_filter_zones: bool = True,
                               density_window: int = 25,
                               density_threshold: float = 0.25,
+                              contour_min_area: int = 200,
+                              contour_min_skeleton_length: int = 50,
+                              red_min_area: int = 80,
                               ) -> Dict[str, np.ndarray]:
     """
     Extrait toutes les couches colorimétriques standard d'une carte.
@@ -170,9 +196,15 @@ def extract_all_color_layers(hsv: np.ndarray, *,
     Arguments :
         clean : applique morphologie + filtrage par taille (défaut : oui).
         skeletonize_contours : transforme les courbes en squelette 1px.
-        dense_filter_zones : applique density_filter sur eau + végétation
-            (utile pour cartes avec quadrillage). Par défaut : oui.
+        dense_filter_zones : applique density_filter sur eau + végétation.
         density_window, density_threshold : voir density_filter().
+        contour_min_area    : aire mini avant squelettisation des courbes
+            (200 px² élimine les fragments de bruit ; 30 explose en 7000+
+            features).
+        contour_min_skeleton_length : longueur minimale (px) d'une courbe
+            APRÈS squelettisation. 50 garde les vraies courbes de niveau et
+            élimine les petits fragments.
+        red_min_area : aire mini pour les routes rouges.
     """
     layers: Dict[str, np.ndarray] = {}
 
@@ -185,23 +217,28 @@ def extract_all_color_layers(hsv: np.ndarray, *,
         if dense_filter_zones:
             m = density_filter(m, window=density_window,
                                 min_density=density_threshold)
-            # Re-clean après filtrage (élimine les petites composantes orphelines)
             m = clean_mask(m, open_kernel=3, close_kernel=5, min_area=200)
         layers[name] = m
 
     # Courbes de niveau : on veut des lignes, pas de density_filter
     contour_raw = mask_from_range(hsv, DEFAULT_RANGES["contours"])
     if clean:
+        # min_area élevé AVANT squelettisation : élimine le bruit en taches
         contour_raw = clean_mask(contour_raw, open_kernel=2,
-                                  close_kernel=3, min_area=30)
+                                  close_kernel=3, min_area=contour_min_area)
     if skeletonize_contours:
         contour_raw = skeletonize_mask(contour_raw)
+        # CRITIQUE : filtre par longueur APRÈS squelettisation, sinon on
+        # se retrouve avec des milliers de mini-fragments (44 → 7434 problème).
+        contour_raw = filter_skeleton_by_length(
+            contour_raw, min_length_px=contour_min_skeleton_length)
     layers["contours"] = contour_raw
 
     # Routes rouges : lignes fines aussi → pas de density_filter
     red_raw = mask_red(hsv)
     if clean:
-        red_raw = clean_mask(red_raw, open_kernel=2, close_kernel=3, min_area=30)
+        red_raw = clean_mask(red_raw, open_kernel=2, close_kernel=3,
+                              min_area=red_min_area)
     layers["red_roads"] = red_raw
 
     return layers

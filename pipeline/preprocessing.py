@@ -122,30 +122,46 @@ def preprocess(path: str | Path, *,
 # -----------------------------------------------------------
 def detect_map_frame(image_bgr: np.ndarray, *,
                      dark_threshold: int = 80,
-                     min_area_ratio: float = 0.25,
-                     pad: int = 5) -> Tuple[int, int, int, int]:
+                     min_area_ratio: float = 0.30,
+                     max_area_ratio: float = 0.95,
+                     pad: int = 5,
+                     aspect_ratio_range: Tuple[float, float] = (0.5, 2.5),
+                     prefer_centered: bool = True,
+                     ) -> Tuple[int, int, int, int]:
     """
     Détecte automatiquement le cadre rectangulaire de la zone cartographique.
 
-    Méthode : on cherche le plus grand contour fermé approximativement
-    rectangulaire dans l'image binarisée. Sur les cartes d'état-major TUNIS
-    1:50000 (et la plupart des cartes topographiques), le neatline est une
-    ligne noire continue qui délimite la zone cartographique des marges.
+    Méthode : binarise l'image, trouve les contours rectangulaires plausibles
+    (taille raisonnable, ratio d'aspect carte, contenant le centre de l'image),
+    et sélectionne le meilleur candidat. Sur les cartes militaires TUNIS
+    1:50000, le neatline est une ligne noire double délimitant la zone utile.
+
+    Trois critères supplémentaires par rapport à la version naïve :
+        1. Filtre par aspect ratio : le neatline d'une carte topo a un ratio
+           h/w typiquement entre 0.5 et 2.5. Élimine la légende qui est
+           souvent étroite (h/w > 3 ou < 0.3).
+        2. Préférence pour les contours qui CONTIENNENT le centre de l'image
+           (le neatline est centré, la légende est en marge).
+        3. Approximation polygonale : un vrai neatline a 4 sommets après
+           cv2.approxPolyDP — on privilégie ces contours.
 
     Paramètres :
-        dark_threshold  : seuil de gris pour binariser (cherche les traits noirs).
-        min_area_ratio  : le cadre doit couvrir au moins cette fraction de l'image.
-        pad             : marge de sécurité (pixels) à enlever après détection
-                          pour éviter de garder un bout du cadre lui-même.
+        dark_threshold     : seuil binarisation pour traits noirs.
+        min_area_ratio     : couverture minimum (fraction de l'image).
+        max_area_ratio     : couverture maximum (évite le bord du scan).
+        pad                : marge de sécurité (pixels) après détection.
+        aspect_ratio_range : (min, max) du rapport h/w accepté.
+        prefer_centered    : True = privilégie les contours contenant le centre.
 
     Retourne (x1, y1, x2, y2) — coordonnées du rectangle intérieur.
     Si aucun cadre n'est détecté, retourne l'image entière.
     """
     H, W = image_bgr.shape[:2]
+    img_area = W * H
+    cx, cy = W // 2, H // 2
+
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
-    # Binarisation : pixels sombres (le neatline est noir)
     _, binary = cv2.threshold(gray, dark_threshold, 255, cv2.THRESH_BINARY_INV)
-    # Fermeture pour reconnecter le neatline si scan abîmé
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
@@ -154,28 +170,50 @@ def detect_map_frame(image_bgr: np.ndarray, *,
     if not contours:
         return (0, 0, W, H)
 
-    # On cherche le contour dont la bbox est la plus grande, en filtrant ceux
-    # qui touchent les bords (souvent le contour de l'image entière) et ceux
-    # trop petits.
-    best_bbox = None
-    best_area = 0
-    img_area = W * H
+    candidates = []
+    ar_min, ar_max = aspect_ratio_range
+
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
         area = w * h
+        # 1) taille
         if area < min_area_ratio * img_area:
             continue
-        if area > 0.98 * img_area:
-            # contour qui suit le bord du scan, on l'ignore
+        if area > max_area_ratio * img_area:
             continue
-        if area > best_area:
-            best_area = area
-            best_bbox = (x, y, w, h)
+        # 2) aspect ratio
+        aspect = h / max(w, 1)
+        if aspect < ar_min or aspect > ar_max:
+            continue
+        # 3) le contour doit contenir (ou presque) le centre de l'image
+        contains_center = (x <= cx <= x + w) and (y <= cy <= y + h)
 
-    if best_bbox is None:
+        # Score : surface normalisee + bonus si centré + bonus si quadrilatère
+        score = area / img_area
+        if contains_center:
+            score += 0.5
+        # Bonus si le contour est approximable par 4 sommets (quadrilatère)
+        epsilon = 0.02 * cv2.arcLength(cnt, True)
+        approx = cv2.approxPolyDP(cnt, epsilon, True)
+        if len(approx) == 4:
+            score += 0.2
+        # Bonus si le rectangle est "rempli" par le contour (vrai neatline
+        # rectangulaire plutôt qu'une forme libre)
+        cnt_area = cv2.contourArea(cnt)
+        fill_ratio = cnt_area / max(area, 1)
+        if fill_ratio < 0.50:
+            # contour très creux (ex: anneau du quadrillage extérieur) :
+            # ça reste valable mais on ne booste pas
+            pass
+        candidates.append((score, (x, y, w, h)))
+
+    if not candidates:
         return (0, 0, W, H)
 
-    x, y, w, h = best_bbox
+    # Tri par score décroissant
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    _, (x, y, w, h) = candidates[0]
+
     x1 = max(0, x + pad)
     y1 = max(0, y + pad)
     x2 = min(W, x + w - pad)

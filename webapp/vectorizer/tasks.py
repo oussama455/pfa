@@ -42,6 +42,8 @@ def _run_pipeline_sync(upload_id: int) -> None:
             input_path=input_path,
             output_dir=output_dir,
             with_semantic=False,   # V1 : segmentation couleur seule
+            auto_crop=True,
+            filter_bbox_margin=getattr(settings, 'PIPELINE_FILTER_MARGIN', 20),
             verbose=False,
         )
 

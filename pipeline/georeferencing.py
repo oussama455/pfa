@@ -103,11 +103,92 @@ class CornerCoords:
     Pour une carte d'état-major TUNIS 1:50000, ces valeurs sont imprimées
     directement aux coins du cadre (lat/lon en degrés-minutes-secondes,
     ou easting/northing en kilomètres si quadrillage UTM/Lambert).
+
+    Format attendu : (x, y) = (longitude, latitude) en degrés décimaux WGS84.
     """
-    top_left: tuple[float, float]      # (x, y) ou (lon, lat)
-    top_right: tuple[float, float]
-    bottom_right: tuple[float, float]
-    bottom_left: tuple[float, float]
+    top_left: tuple[float, float]      # NW : (lon, lat)
+    top_right: tuple[float, float]     # NE
+    bottom_right: tuple[float, float]  # SE
+    bottom_left: tuple[float, float]   # SW
+
+    def validate_wgs84(self) -> None:
+        """
+        Vérifie que les coordonnées sont dans des plages WGS84 plausibles.
+        Lève ValueError si une coordonnée est hors limites ou si l'ordre
+        géographique est incorrect.
+        """
+        for label, pt in [("top_left", self.top_left),
+                          ("top_right", self.top_right),
+                          ("bottom_right", self.bottom_right),
+                          ("bottom_left", self.bottom_left)]:
+            lon, lat = pt
+            if not (-180.0 <= lon <= 180.0):
+                raise ValueError(f"{label} : longitude {lon} hors [-180, 180]. "
+                                 "Vérifier l'ordre (lon, lat) et le format décimal.")
+            if not (-90.0 <= lat <= 90.0):
+                raise ValueError(f"{label} : latitude {lat} hors [-90, 90].")
+
+        # Cohérence géographique : top doit être au nord du bottom
+        tl_lat = self.top_left[1]
+        bl_lat = self.bottom_left[1]
+        if tl_lat <= bl_lat:
+            raise ValueError(
+                f"top_left.lat ({tl_lat}) doit être > bottom_left.lat ({bl_lat}). "
+                "Tu as peut-être inversé top et bottom, ou utilisé l'ordre (lat, lon) "
+                "au lieu de (lon, lat)."
+            )
+        # Cohérence : right doit être à l'est du left (sauf antiméridien)
+        tl_lon = self.top_left[0]
+        tr_lon = self.top_right[0]
+        if tr_lon <= tl_lon:
+            raise ValueError(
+                f"top_right.lon ({tr_lon}) doit être > top_left.lon ({tl_lon})."
+            )
+
+    def is_in_tunisia(self) -> bool:
+        """Heuristique : True si les 4 coins tombent dans la Tunisie (~7-12°E, 30-37.5°N)."""
+        for lon, lat in (self.top_left, self.top_right,
+                         self.bottom_right, self.bottom_left):
+            if not (7.0 <= lon <= 12.0): return False
+            if not (30.0 <= lat <= 37.5): return False
+        return True
+
+
+# ---------------------------------------------------------------------
+# Helpers : conversion DMS ↔ degrés décimaux
+# ---------------------------------------------------------------------
+def dms_to_decimal(degrees: float, minutes: float = 0.0,
+                    seconds: float = 0.0, *,
+                    hemisphere: str = "") -> float:
+    """
+    Convertit Degrés/Minutes/Secondes en degrés décimaux.
+
+    Exemple lecture coin de carte TUNIS :
+        >>> dms_to_decimal(36, 48, 23, hemisphere='N')
+        36.806388...
+        >>> dms_to_decimal(10, 11, 0, hemisphere='E')
+        10.183333...
+
+    hemisphere : 'N'/'E' (positif), 'S'/'W' (négatif), '' (signe selon degrees).
+    """
+    sign = 1
+    h = hemisphere.strip().upper()
+    if h in ("S", "W"):
+        sign = -1
+    elif h in ("", "N", "E"):
+        sign = -1 if degrees < 0 else 1
+    return sign * (abs(degrees) + minutes / 60.0 + seconds / 3600.0)
+
+
+def decimal_to_dms(decimal_deg: float) -> tuple[int, int, float]:
+    """Convertit degrés décimaux en (deg, min, sec) — pour vérifier visuellement."""
+    sign = -1 if decimal_deg < 0 else 1
+    d = abs(decimal_deg)
+    deg = int(d)
+    m = (d - deg) * 60
+    minutes = int(m)
+    seconds = (m - minutes) * 60
+    return sign * deg, minutes, seconds
 
 
 def _bilinear_interp(col: float, row: float,
@@ -138,15 +219,23 @@ def _bilinear_interp(col: float, row: float,
 def gcps_from_corners(bbox_px: tuple[int, int, int, int],
                       corners: CornerCoords,
                       *,
-                      n_samples: int = 5) -> List[GCP]:
+                      n_samples: int = 5,
+                      validate: bool = True) -> List[GCP]:
     """
     Génère une grille N×N de GCPs sur le cadre, en interpolant les coords
     monde à partir des 4 coins.
 
     Cas simple si tu n'as pas le quadrillage : 5×5 = 25 GCPs suffisent
     pour calculer une transformation affine fiable.
+
+    validate : si True, vérifie que les coordonnées des coins sont des
+        WGS84 plausibles (évite l'inversion lon/lat fréquente).
     """
+    if validate:
+        corners.validate_wgs84()
     x1, y1, x2, y2 = bbox_px
+    if x2 <= x1 or y2 <= y1:
+        raise ValueError(f"bbox_px invalide : {bbox_px}. Attendu (x1,y1,x2,y2) avec x1<x2 et y1<y2.")
     gcps = []
     for i in range(n_samples):
         for j in range(n_samples):
@@ -163,7 +252,8 @@ def gcps_from_grid_intersections(intersections_px: np.ndarray,
                                   bbox_px: tuple[int, int, int, int],
                                   corners: CornerCoords,
                                   *,
-                                  intersections_in_crop_frame: bool = True) -> List[GCP]:
+                                  intersections_in_crop_frame: bool = True,
+                                  validate: bool = True) -> List[GCP]:
     """
     À partir des intersections du quadrillage détectées par
     `pipeline.grid_extraction.grid_intersections`, génère un GCP par
@@ -178,6 +268,8 @@ def gcps_from_grid_intersections(intersections_px: np.ndarray,
     Beaucoup plus de points que `gcps_from_corners` → ajustement plus
     précis si la carte a une légère déformation (pliage, scan).
     """
+    if validate:
+        corners.validate_wgs84()
     x1, y1, _, _ = bbox_px
     gcps = []
     for col, row in intersections_px:

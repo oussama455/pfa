@@ -29,6 +29,22 @@ from . import vectorization as vec
 from . import georeferencing as geo
 
 
+def _apply_transform_to_geom(geom, transform):
+    """
+    Applique une transformation affine rasterio aux coordonnées d'une
+    géométrie Shapely. Utilisé après filter_features_by_bbox (qui doit
+    travailler en pixels) pour reprojeter en coords monde.
+    """
+    from shapely.ops import transform as shapely_transform
+    def fn(xs, ys):
+        new_xs, new_ys = [], []
+        for x, y in zip(xs, ys):
+            wx, wy = transform * (x, y)
+            new_xs.append(wx); new_ys.append(wy)
+        return new_xs, new_ys
+    return shapely_transform(fn, geom)
+
+
 @dataclass
 class PipelineResult:
     """Résumé de l'exécution du pipeline."""
@@ -52,6 +68,8 @@ def run_pipeline(input_path: str | Path,
                  auto_crop: bool = True,
                  manual_bbox: Optional[tuple] = None,
                  device: Optional[str] = None,
+                 filter_bbox_margin: int = 20,
+                 filter_bbox_mode: str = "centroid",
                  verbose: bool = True) -> PipelineResult:
     """
     Pipeline complet : raster → GeoJSON par couche.
@@ -136,13 +154,42 @@ def run_pipeline(input_path: str | Path,
     layers_out: Dict[str, str] = {}
     counts: Dict[str, int] = {}
 
+    # bbox de filtrage (en pixels DU CROP) : on rejette les features qui
+    # touchent les `margin` premiers pixels près du bord (souvent légende
+    # résiduelle après auto_crop imparfait).
+    H_crop, W_crop = image_hsv.shape[:2]
+    crop_filter_bbox_px = (0, 0, W_crop, H_crop)
+    if filter_bbox_margin > 0 and verbose:
+        print(f"       Filtre bord : margin={filter_bbox_margin}px, mode={filter_bbox_mode}")
+
+    def _maybe_filter(geoms, mode_override=None):
+        """Applique filter_features_by_bbox si margin > 0."""
+        if filter_bbox_margin <= 0 or not geoms:
+            return geoms
+        # Si geoms sont en monde (transform fourni), il faut filter en monde.
+        # Pour simplifier on filtre en pixels AVANT la transform — donc on
+        # a re-fait mask_to_polygons sans transform plus haut. Ici geoms
+        # peuvent être déjà en monde si transform != None ; on saute alors.
+        if transform is not None:
+            return geoms
+        return vec.filter_features_by_bbox(
+            geoms, crop_filter_bbox_px,
+            margin=filter_bbox_margin,
+            mode=mode_override or filter_bbox_mode,
+        )
+
     # --- A. POLYGONES (Eau, Végétation) ---
     poly_layers = ["water", "vegetation"]
     for name in poly_layers:
         mask = color_masks.get(name)
         if mask is None:
             continue
-        polys = vec.mask_to_polygons(mask, transform=transform)
+        # On extrait d'abord en pixels (sans transform) pour pouvoir filtrer
+        polys = vec.mask_to_polygons(mask, transform=None)
+        polys = _maybe_filter(polys)
+        if transform is not None:
+            # Re-projeter en coords monde après filtrage
+            polys = [_apply_transform_to_geom(p, transform) for p in polys]
         if not polys:
             continue
         gdf = vec.to_geodataframe(polys, layer_name=name, crs=crs if transform else None)
@@ -155,7 +202,10 @@ def run_pipeline(input_path: str | Path,
     red_road_mask = color_masks.get("red_roads")
     if red_road_mask is not None and red_road_mask.any():
         skeleton = skeletonize(red_road_mask > 0)
-        lines = vec.skeleton_to_lines(skeleton, transform=transform)
+        lines = vec.skeleton_to_lines(skeleton, transform=None)
+        lines = _maybe_filter(lines, mode_override="centroid")
+        if transform is not None:
+            lines = [_apply_transform_to_geom(ln, transform) for ln in lines]
         if lines:
             gdf = vec.to_geodataframe(lines, layer_name="red_roads", crs=crs if transform else None)
             out_path = output_dir / "red_roads.geojson"
@@ -165,7 +215,10 @@ def run_pipeline(input_path: str | Path,
 
     contour_mask = color_masks.get("contours")
     if contour_mask is not None and contour_mask.any():
-        lines = vec.skeleton_to_lines(contour_mask, transform=transform)
+        lines = vec.skeleton_to_lines(contour_mask, transform=None)
+        lines = _maybe_filter(lines, mode_override="centroid")
+        if transform is not None:
+            lines = [_apply_transform_to_geom(ln, transform) for ln in lines]
         if lines:
             gdf = vec.to_geodataframe(lines, layer_name="contours",
                                       crs=crs if transform else None)
@@ -176,7 +229,10 @@ def run_pipeline(input_path: str | Path,
 
     # --- C. SÉMANTIQUE (Bâtiments, Routes IA) ---
     for name, mask in semantic_masks.items():
-        polys = vec.mask_to_polygons(mask, transform=transform)
+        polys = vec.mask_to_polygons(mask, transform=None)
+        polys = _maybe_filter(polys)
+        if transform is not None:
+            polys = [_apply_transform_to_geom(p, transform) for p in polys]
         if not polys:
             continue
         gdf = vec.to_geodataframe(polys, layer_name=name, crs=crs if transform else None)
