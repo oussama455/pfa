@@ -1,287 +1,255 @@
-# PFA — Agent IA de vectorisation de cartes militaires
+# CartoVec - PFA vectorisation de cartes historiques
 
-**Étudiant :** Oussama CHOUAIBI — Géomatique 2ᵉ année
-**Encadrant :** Kamel BENRAIS — Ingénieur Principal, ELFOULADH
-**École :** EABA — Tunisie
+**Etudiant :** Oussama CHOUAIBI - Geomatique 2e annee  
+**Encadrant :** Kamel BENRAIS - Ingenieur Principal, ELFOULADH  
+**Ecole :** EABA - Tunisie
 
-> Environnement : **Anaconda** (Python 3.10, voir `environment.yml`)
+CartoVec transforme des cartes topographiques raster scannees en couches
+vectorielles exploitables dans un SIG. Le projet combine un pipeline Python
+OpenCV/PyTorch/GeoPandas, un agent LangGraph, une API Django REST et une
+interface React/Vite avec Leaflet pour visualiser et corriger les resultats.
 
-> Agent intelligent pour transformer des cartes topographiques raster (scan/papier) en données vectorielles géoréférencées (GeoJSON / Shapefile), utilisables dans un SIG militaire.
+## Etat actuel
 
----
+- Pipeline image : pretraitement, segmentation couleur, segmentation U-Net,
+  vectorisation, georeferencement et export GeoJSON.
+- Agent IA : perception, traitement, QA, auto-correction, georeferencement et
+  export avec journal d'audit.
+- Active Learning : les corrections humaines ajustent progressivement les
+  plages HSV par serie de carte.
+- Backend Django : upload, suivi de statut, API REST, stockage des corrections
+  et exposition des GeoJSON produits.
+- Frontend React/Vite : upload, liste des cartes, visualisation Leaflet,
+  edition/suppression de features et panneau Active Learning.
+- Dataset SEMAP : chargeur PyTorch et scripts d'entrainement U-Net.
 
-## Philosophie
+Le document de cadrage est disponible ici :
+[`PFA_Cadrage_Oussama_Chouaibi.docx`](./PFA_Cadrage_Oussama_Chouaibi.docx).
 
-Ce projet **n'est pas** une réécriture de modèles de deep learning depuis zéro.
-Il **assemble** des briques open source éprouvées dans un pipeline cohérent, exposé via une interface Django.
+## Arborescence
 
-Pour le détail de la stratégie et de l'architecture, voir le document de cadrage : [`PFA_Cadrage_Mohamed_GHARBI.docx`](./PFA_Cadrage_Mohamed_GHARBI.docx).
-
----
-
-## Architecture
-
-```
-Carte raster (PNG/TIF)
-        │
-        ▼
-┌───────────────────────┐
-│  Prétraitement        │  OpenCV (débruitage, HSV, normalisation)
-└───────────────────────┘
-        │
-        ├──────────────────────────────┐
-        ▼                              ▼
-┌───────────────────────┐    ┌───────────────────────┐
-│  Segmentation couleur │    │  Segmentation U-Net   │
-│  (eau, végétation,    │    │  (routes, bâtiments)  │
-│   courbes, rouge)     │    │                       │
-│  — OpenCV             │    │  — PyTorch + SMP      │
-└───────────────────────┘    └───────────────────────┘
-        │                              │
-        └──────────────┬───────────────┘
-                       ▼
-        ┌───────────────────────────────┐
-        │  Vectorisation                │  rasterio.features + Shapely
-        │  (raster masks → geometries)  │
-        └───────────────────────────────┘
-                       │
-                       ▼
-        ┌───────────────────────────────┐
-        │  Géoréférencement             │  GDAL / rasterio (GCPs)
-        └───────────────────────────────┘
-                       │
-                       ▼
-        ┌───────────────────────────────┐
-        │  Export GeoJSON / Shapefile   │  GeoPandas
-        └───────────────────────────────┘
-                       │
-                       ▼
-        ┌───────────────────────────────┐
-        │  Django + Leaflet             │  Visualisation + download
-        └───────────────────────────────┘
-```
-
----
-
-## Arborescence du projet
-
-```
+```text
 pfa/
-├── README.md
-├── requirements.txt
-├── .gitignore
-├── PFA_Cadrage_Mohamed_GHARBI.docx   ← document de cadrage
-│
-├── pipeline/              ← cœur du traitement (modules Python)
-│   ├── __init__.py
-│   ├── preprocessing.py       → nettoyage, HSV, détection auto du cadre carto
-│   ├── color_segmentation.py  → eau, végétation, courbes, rouge (OpenCV + density_filter)
-│   ├── grid_extraction.py     → détection auto du quadrillage kilométrique
-│   ├── semantic_segmentation.py → routes, bâtiments (U-Net, optionnel)
-│   ├── vectorization.py       → raster → vecteur (Shapely)
-│   ├── georeferencing.py      → GCPs auto depuis 4 coins + quadrillage (GDAL)
-│   └── pipeline.py            → orchestrateur bout en bout
-│
-├── webapp/                ← application Django
-│   ├── manage.py
-│   ├── cartovec/              → projet Django
-│   └── vectorizer/            → app Django
-│
-├── notebooks/             ← exploration et démos
-│   ├── 01_color_segmentation_demo.ipynb   → segmentation couleur + vectorisation
-│   ├── 02_hsv_calibration.ipynb           → calibration interactive HSV
-│   └── 03_georeferencing.ipynb            → géoréférencement automatique
-│
-├── data/
-│   ├── raw/                   → cartes raster d'entrée
-│   └── processed/             → vecteurs de sortie
-│
-├── external/              ← repos open source clonés (via scripts/clone_sources.sh)
-│
-├── scripts/               ← utilitaires
-│   └── clone_sources.sh       → clone soduco et autres
-│
-├── tests/                 ← tests unitaires
-└── docs/                  ← rapport, slides (à venir)
+|-- README.md
+|-- requirements.txt
+|-- environment.yml
+|-- environment_cuda.yml
+|-- data/
+|   |-- dataset_config.json       # configuration HSV canonique
+|   |-- semap_config.json         # chemin local du dataset SEMAP
+|   |-- raw/                      # cartes raster d'entree, hors Git
+|   |-- processed/                # sorties generees, hors Git
+|-- docs/
+|-- external/
+|   |-- weight/                   # checkpoints locaux, hors Git
+|-- notebooks/
+|-- pipeline/                     # coeur Python du traitement
+|-- scripts/                      # entrainement, diagnostics, preparation GT
+|-- shared/
+|-- webapp/
+|   |-- cartovec/                 # configuration Django
+|   |-- vectorizer/               # models, views, API, tasks
+|   |-- frontend/                 # React/Vite + Leaflet
 ```
 
----
+## Installation
 
-## Option A — Google Colab (recommandé : aucune install, GPU T4 gratuit)
+Sur Windows, Conda est recommande pour GDAL, Rasterio, Fiona et GeoPandas.
 
-Si tu n'as pas envie de te battre avec Anaconda + Windows DLLs, ouvre les notebooks dans Colab.
-
-**Avantages** :
-- Pas d'installation locale
-- GPU T4 gratuit (15 Go VRAM, ~3x plus que ta RTX 2050) pour le U-Net
-- Tu peux travailler depuis n'importe quel PC (ou ton téléphone)
-
-**Comment faire** :
-
-1. Pousse ton projet sur GitHub (ou utilise Google Drive — voir option 3).
-2. Va sur [colab.research.google.com](https://colab.research.google.com/).
-3. **File > Upload notebook** → sélectionne `notebooks/01_color_segmentation_demo.ipynb`.
-4. Active la GPU : **Exécution > Modifier le type d'exécution > T4 GPU**.
-5. Dans la première cellule du notebook, mets ton `REPO_URL` (par exemple `https://github.com/oussama455/pfa.git`).
-6. Lance les cellules dans l'ordre. La cellule de Setup pip-install les dépendances et clone ton repo automatiquement.
-
-**3 façons de fournir tes données dans Colab** :
-
-| Méthode | Quand l'utiliser | Comment |
-|---|---|---|
-| **GitHub clone** | Données pas trop grosses (<100 Mo), versionnées | `REPO_URL = '...'` dans la première cellule |
-| **Google Drive** | Cartes lourdes que tu ne veux pas pousser sur GitHub | `USE_DRIVE = True`, projet dans `MyDrive/pfa/` |
-| **Upload manuel** | Test ponctuel, une seule carte | Icône dossier 📁 → glisse-dépose dans `pfa/data/raw/` |
-
-**Note importante** : si tu modifies un fichier `.py` du pipeline pendant que le notebook tourne dans Colab, fais `Exécution > Redémarrer l'exécution` (sinon les changements ne sont pas pris en compte).
-
----
-
-## Option B — Local Anaconda (recommandé sur Windows)
-
-GDAL, rasterio, geopandas et fiona sont pénibles à installer via pip sur Windows. Avec conda-forge ils s'installent en une commande.
-
-### 1. Prérequis
-
-- **Anaconda** ou **Miniconda** ([miniconda.org](https://docs.conda.io/en/latest/miniconda.html))
-- **Git**
-- Optionnel : **QGIS** pour valider visuellement les sorties
-
-### 2. Création de l'environnement
-
-Ouvre **Anaconda Prompt** (pas le CMD Windows classique) et lance :
+### CPU / environnement standard
 
 ```bash
-cd C:\Users\ochou\Documents\Claude\Projects\pfa
 conda env create -f environment.yml
 conda activate pfa
-```
-
-La création prend 5-10 min (téléchargement des paquets conda-forge). Tu auras un env nommé `pfa` avec Python 3.10, GDAL, rasterio, geopandas, opencv, jupyter, etc.
-
-### 3. Enregistrer le kernel Jupyter
-
-```bash
 python -m ipykernel install --user --name pfa --display-name "Python (pfa)"
 ```
 
-→ Le kernel apparaît dans Jupyter comme `Python (pfa)`. Choisis-le dans `Kernel > Change kernel` à l'ouverture des notebooks.
-
-### 3 bis. Activer le GPU (RTX 2050)
-
-PyTorch installé via `environment.yml` est en version CPU par défaut. Pour bénéficier de ton GPU NVIDIA RTX 2050 (forte accélération sur l'U-Net) :
+### GPU NVIDIA / CUDA 12.1
 
 ```bash
+conda env create -f environment_cuda.yml
 conda activate pfa
-pip uninstall -y torch torchvision
-pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-```
-
-Vérifie ensuite que CUDA est bien détectée :
-
-```bash
 python scripts/test_gpu.py
 ```
 
-Sortie attendue :
+`environment_cuda.yml` installe PyTorch CUDA 12.1 depuis l'index officiel
+PyTorch. Si CUDA n'est pas disponible, le pipeline peut retomber sur CPU.
 
-```
-PyTorch       : 2.x.x+cu121
-CUDA dispo    : True
-GPUs detectees: 1
-  [0] NVIDIA GeForce RTX 2050  (compute 8.6, 4.00 Go VRAM)
-Benchmark : forward pass U-Net resnet34, batch (1, 3, 512, 512)
-  CPU  : ~2500 ms / forward
-  GPU  : ~50 ms / forward
-  Acceleration GPU : x50
-```
-
-**Si pas de GPU détectée** → le pipeline fait du fallback automatique sur CPU. Tout fonctionne, c'est juste plus lent pour la partie U-Net (la segmentation couleur reste rapide quel que soit le device).
-
-Le pipeline auto-détecte le device via `pipeline.semantic_segmentation.get_device()`. Tu peux forcer le device en CLI :
+### Alternative pip
 
 ```bash
-python -m pipeline.pipeline data/raw/carte.png --semantic --device cuda     # force GPU
-python -m pipeline.pipeline data/raw/carte.png --semantic --device cpu      # force CPU
-python -m pipeline.pipeline data/raw/carte.png --semantic --device auto     # défaut
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
 ```
 
-### 4. Cloner les repos open source externes
+Les dependances frontend sont gerees separement par npm :
 
 ```bash
-bash scripts/clone_sources.sh
+cd webapp/frontend
+npm install
 ```
 
-Cela clone dans `external/` : `soduco/Benchmark_historical_map_vectorization`, `farhad-dalirani/Satellite-Imagery-Road-Segmentation`, `makinacorpus/django-leaflet`.
+## Lancer le projet complet
 
-### 5. Lancer Jupyter et les notebooks
-
-```bash
-jupyter lab
-# ou : jupyter notebook
-```
-
-Ouvre dans l'ordre :
-1. `notebooks/01_color_segmentation_demo.ipynb` — premier résultat visuel sans deep learning.
-2. `notebooks/02_hsv_calibration.ipynb` — calibre les plages HSV sur ta carte.
-3. `notebooks/03_georeferencing.ipynb` — génère les GCPs depuis le quadrillage et géoréférence.
-
-Chaque notebook commence par une cellule **Vérification de l'environnement** qui contrôle que les imports critiques fonctionnent.
-
-### 6. Lancer l'application web
+Terminal 1 - backend Django :
 
 ```bash
+conda activate pfa
 cd webapp
 python manage.py migrate
 python manage.py runserver
 ```
 
-→ http://127.0.0.1:8000/
+Backend/API : http://127.0.0.1:8000/
 
-### Alternative : venv + pip (Linux/macOS)
-
-Si tu n'utilises pas Anaconda :
+Terminal 2 - frontend React :
 
 ```bash
-python -m venv .venv
-source .venv/bin/activate     # ou .venv\Scripts\activate sous Windows
-pip install -r requirements.txt
+cd webapp/frontend
+npm install
+npm run dev
 ```
 
-Sur Linux il faut d'abord `sudo apt install gdal-bin libgdal-dev` avant `pip install rasterio`.
+Frontend : http://127.0.0.1:5173/
 
----
+Le serveur Vite proxifie automatiquement `/api` et `/media` vers Django sur
+`127.0.0.1:8000`.
 
-## Plan de travail (résumé)
+## Relation pipeline - webapp
 
-Voir le document de cadrage pour le détail. Résumé :
+1. Le frontend envoie une carte a `POST /api/maps/`.
+2. Django cree un `MapUpload` puis appelle `enqueue_pipeline()`.
+3. `webapp/vectorizer/tasks.py` lance un thread de traitement.
+4. Le thread appelle `pipeline.agent.run_agent()`.
+5. Le pipeline ecrit les GeoJSON dans `webapp/media/processed/map_<id>/`.
+6. `MapUpload.output_layers` expose ces fichiers sous forme d'URLs `/media/...`.
+7. React charge `/api/maps/<id>/geojson/` et affiche les couches dans Leaflet.
+8. Les corrections HITL sont envoyees a `/api/maps/<id>/corrections/`.
+9. `api_v2.py` sauvegarde les corrections et met a jour `pipeline.active_learning`.
 
-| Phase | Durée | Livrable |
-|-------|-------|----------|
-| P1 | S1–S2 | Environnement + carte de test + notebook |
-| P2 | S3–S4 | Script de segmentation couleur (OpenCV) |
-| P3 | S5–S6 | Script de segmentation U-Net (routes/bâtiments) |
-| P4 | S7–S8 | Vectorisation + géoréférencement + GeoJSON |
-| P5 | S9–S10 | Interface Django complète |
-| P6 | S11–S12 | Rédaction rapport + slides |
+Principaux endpoints REST :
 
----
+```text
+GET    /api/maps/
+POST   /api/maps/
+GET    /api/maps/<id>/
+GET    /api/maps/<id>/status/
+GET    /api/maps/<id>/geojson/
+PATCH  /api/maps/<id>/corrections/
+GET    /api/calibration/<series>/
+GET    /api/calibration/history/?map_id=<id>
+POST   /api/calibration/<series>/reset/
+```
 
-## Licences des briques externes
+## Utilisation du pipeline seul
 
-| Repo | Licence |
-|------|---------|
-| soduco/Benchmark_historical_map_vectorization | MIT |
-| farhad-dalirani/Satellite-Imagery-Road-Segmentation | MIT |
-| makinacorpus/django-leaflet | LGPL |
+Segmentation couleur et vectorisation :
+
+```bash
+python -m pipeline.pipeline data/raw/carte.png -o data/processed
+```
+
+Avec segmentation semantique U-Net :
+
+```bash
+python -m pipeline.pipeline data/raw/carte.png ^
+  -o data/processed ^
+  --semantic ^
+  --weights external/weight/semap_unet_best.pth ^
+  --device auto
+```
+
+Agent IA :
+
+```python
+from pipeline.agent import run_agent
+
+result = run_agent(
+    raster_path="data/raw/tunis_1969.jpg",
+    output_dir="data/processed/tunis_1969",
+    map_name="tunis",
+    weights_path="external/weight/semap_unet_best.pth",
+    device="auto",
+)
+
+print(result["output_geojsons"])
+```
+
+## Dataset SEMAP
+
+SEMAP est utilise pour entrainer un U-Net de segmentation semantique en
+6 classes :
+
+`background`, `contours`, `built`, `non_built`, `water`, `road_network`.
+
+Le dataset reste hors Git. Le chemin local est defini dans
+[`data/semap_config.json`](./data/semap_config.json), champ `external_root`.
+
+Verifier le dataset :
+
+```python
+from pipeline.semap_dataset import SemapDataset
+
+ds = SemapDataset(split="train", target_size=(512, 512), augment=True)
+print(ds.stats())
+```
+
+Entrainer le modele :
+
+```bash
+python scripts/train_semap.py --epochs 20 --batch-size 8
+python scripts/train_semap.py --target-size 384 --batch-size 4
+python scripts/train_semap.py --no-synthetic --epochs 30
+```
+
+Les checkpoints sont ecrits dans `external/weight/` et ignores par Git.
+
+## Fichiers generes et Git
+
+Les elements suivants ne doivent pas etre versionnes :
+
+- `webapp/media/uploads/`
+- `webapp/media/processed/`
+- `webapp/frontend/node_modules/`
+- `webapp/frontend/dist/`
+- `data/processed/`, `outputs/`, `runs/`
+- checkpoints PyTorch (`*.pth`, `*.pt`, `*.ckpt`)
+- exports GeoJSON/Shapefile/GeoTIFF generes
+
+`webapp/frontend/package-lock.json` doit etre conserve pour rendre les builds
+frontend reproductibles.
+
+## Google Colab
+
+Les notebooks peuvent etre lances dans Colab avec :
+
+```python
+from notebooks.colab_setup import setup
+
+project_root = setup(
+    repo_url="https://github.com/<user>/pfa.git",
+    branch="main",
+    install=True,
+)
+```
+
+Pour des cartes lourdes, utilisez `use_drive=True` et placez le projet dans
+`/content/drive/MyDrive/pfa`.
+
+## Licences
+
+| Ressource | Licence |
+|---|---|
+| SEMAP dataset | CC BY 4.0 |
+| SODUCO Benchmark historical map vectorization | MIT |
+| Satellite Imagery Road Segmentation | MIT |
+| django-leaflet | LGPL |
 | OpenCV | Apache 2.0 |
-| rasterio / GeoPandas / Shapely | BSD |
+| Rasterio / GeoPandas / Shapely | BSD |
 | Django | BSD |
-
-Toutes compatibles avec un projet académique et une réutilisation du code.
-
----
+| React / Vite / Leaflet | MIT / BSD-style |
 
 ## Contact
 
-Pour toute question sur le projet : ochouaibi1919@gmail.com
+ochouaibi1919@gmail.com

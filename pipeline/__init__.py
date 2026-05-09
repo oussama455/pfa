@@ -7,7 +7,7 @@ Chaîne de traitement :
 """
 
 __version__ = "0.1.0"
-__author__ = "Mohamed GHARBI"
+__author__ = "Oussama CHOUAIBI"
 
 # Imports paresseux : on ne charge PAS les sous-modules au import du package.
 # Cela permet d'utiliser, par exemple, `from pipeline import preprocessing`

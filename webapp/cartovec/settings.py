@@ -6,35 +6,112 @@ Configuration minimale pour un PFA :
     - App vectorizer enregistrée
     - Médias (uploads) dans webapp/media/
     - django-leaflet pour la carte
+
+Toutes les valeurs sensibles sont chargées via .env (voir .env.example).
 """
 import os
 import sys
 from pathlib import Path
 
-CONDA_PREFIX = r'C:\Users\ochou\anaconda3\envs\geo'
-GDAL_BIN = os.path.join(CONDA_PREFIX, 'Library', 'bin')
+# ---------------------------------------------------------------------------
+# Ajout du PROJECT_ROOT au sys.path AVANT toute autre logique.
+# Sans ça, `from pipeline.agent import run_agent` plante avec
+# ModuleNotFoundError parce que Django est lance depuis webapp/ et le
+# package pipeline/ se trouve un cran au-dessus.
+# ---------------------------------------------------------------------------
+_BASE_DIR = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = _BASE_DIR.parent
+if str(_PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(_PROJECT_ROOT))
 
-# Add GDAL bin directory so dependent DLLs are found correctly.
-os.add_dll_directory(GDAL_BIN)
-os.environ['PATH'] = GDAL_BIN + os.path.pathsep + os.environ['PATH']
+# Charge les variables d'environnement depuis webapp/.env (silencieux si absent)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(_BASE_DIR / '.env')
+except ImportError:
+    pass  # python-dotenv non installé — les variables système sont utilisées directement
 
-# Auto-detect GDAL DLL name (e.g., gdal.dll, gdal310.dll) to avoid hardcoded version issues.
-gdal_files = [f for f in os.listdir(GDAL_BIN) if f.startswith('gdal') and f.endswith('.dll')]
-if gdal_files:
-    GDAL_LIBRARY_PATH = os.path.join(GDAL_BIN, gdal_files[0])
-else:
-    GDAL_LIBRARY_PATH = os.path.join(GDAL_BIN, 'gdal.dll')
 
-GEOS_LIBRARY_PATH = os.path.join(GDAL_BIN, 'geos_c.dll')
+def _str_to_bool(value: str) -> bool:
+    return value.strip().lower() in ('true', '1', 'yes', 'on')
+
+
+# ---------------------------------------------------------------------------
+# GDAL / GEOS — Windows uniquement
+# Sur Linux/macOS/Colab ces librairies sont trouvées automatiquement.
+#
+# Sur Windows, on définit CONDA_ENV_PATH dans .env (voir .env.example).
+# Si CONDA_ENV_PATH est vide ou invalide, on essaie quelques fallbacks
+# courants avant d'avertir.
+# ---------------------------------------------------------------------------
+if os.name == 'nt':  # Windows seulement
+    _candidate_paths = []
+    _user_path = os.environ.get('CONDA_ENV_PATH', '').strip()
+    if _user_path:
+        _candidate_paths.append(_user_path)
+    # Fallbacks classiques pour env conda nommé pfa, geo, ou base
+    _username = os.environ.get('USERNAME', '')
+    for _base in (rf'C:\Users\{_username}\anaconda3',
+                  rf'C:\Users\{_username}\miniconda3',
+                  r'C:\ProgramData\anaconda3',
+                  r'C:\ProgramData\miniconda3'):
+        for _env_name in ('pfa', 'geo', ''):  # '' = base env
+            if _env_name:
+                _candidate_paths.append(os.path.join(_base, 'envs', _env_name))
+            else:
+                _candidate_paths.append(_base)
+
+    GDAL_BIN = None
+    for _path in _candidate_paths:
+        if not _path:
+            continue
+        _bin = os.path.join(_path, 'Library', 'bin')
+        if os.path.isdir(_bin) and os.path.exists(os.path.join(_bin, 'geos_c.dll')):
+            GDAL_BIN = _bin
+            break
+
+    if GDAL_BIN:
+        try:
+            os.add_dll_directory(GDAL_BIN)
+        except (OSError, AttributeError):
+            pass  # add_dll_directory disponible seulement sur Windows + Py 3.8+
+        os.environ['PATH'] = GDAL_BIN + os.path.pathsep + os.environ.get('PATH', '')
+
+        gdal_files = [f for f in os.listdir(GDAL_BIN)
+                      if f.startswith('gdal') and f.endswith('.dll')]
+        GDAL_LIBRARY_PATH = os.path.join(GDAL_BIN, gdal_files[0] if gdal_files else 'gdal.dll')
+        GEOS_LIBRARY_PATH = os.path.join(GDAL_BIN, 'geos_c.dll')
+    else:
+        import warnings
+        warnings.warn(
+            "GDAL_BIN introuvable. Définis CONDA_ENV_PATH dans webapp/.env "
+            "(copier webapp/.env.example) en pointant vers ton env conda. "
+            f"Tente : {_candidate_paths[:3]}",
+            RuntimeWarning,
+            stacklevel=1,
+        )
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = BASE_DIR.parent  # racine du dépôt (pfa/)
 
 # ------------------------------------------------------------
 # Sécurité
 # ------------------------------------------------------------
-SECRET_KEY = 'dev-only-change-me-in-production-0123456789abcdef'
-DEBUG = True
-ALLOWED_HOSTS = ['localhost', '127.0.0.1']
+SECRET_KEY = os.environ.get(
+    'SECRET_KEY',
+    'dev-only-change-me-in-production-0123456789abcdef'
+)
+DEBUG = _str_to_bool(os.environ.get('DEBUG', 'True'))
+ALLOWED_HOSTS = [h.strip() for h in
+                 os.environ.get('ALLOWED_HOSTS', 'localhost,127.0.0.1').split(',')
+                 if h.strip()]
+
+
+# ------------------------------------------------------------
+# Pipeline (configurable via .env)
+# ------------------------------------------------------------
+PIPELINE_MAX_DIMENSION = int(os.environ.get('PIPELINE_MAX_DIMENSION', '2400'))
+PIPELINE_FILTER_MARGIN = int(os.environ.get('PIPELINE_FILTER_MARGIN', '20'))
 
 
 # ------------------------------------------------------------
@@ -50,6 +127,7 @@ INSTALLED_APPS = [
     'leaflet',
     'djgeojson',
     'vectorizer',
+    'rest_framework'
 ]
 
 MIDDLEWARE = [
@@ -134,4 +212,3 @@ LEAFLET_CONFIG = {
 
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
-

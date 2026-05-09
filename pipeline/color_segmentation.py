@@ -18,7 +18,7 @@ des lignes fines (quadrillage).
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import cv2
 import numpy as np
@@ -54,11 +54,31 @@ class HSVRange:
 
 # Defaults plus stricts (saturation min plus élevée pour éviter de prendre
 # le papier crème / jauni des cartes anciennes).
+# Plages calibrées sur cartes AMS/GSGS Algeria 1:50,000 (Aïn Bessem, GSGS 4072)
+# Validé empiriquement sur carte.png (6719×5319 px, downscalée à 2400px).
+#
+# red_roads : Le rouge cartographique se situe dans H=0-10 (rouge pur) et H=170-180
+#             (cramoisi). S_min=90 élimine les tons pastels tout en gardant les routes.
+#             Ces masques sont SQUELETTISÉS pour produire des LineStrings (non des polygones).
+#
+# buildings : Bâtiments = gris foncé / anthracite, faible saturation, faible luminosité.
+#             S_max=50, V_max=130. Produit des polygones fermés.
+#
+# contours  : Brun pâle AMS, S_min abaissé à 40 (au lieu de 70 dans la v1).
 DEFAULT_RANGES: Dict[str, HSVRange] = {
-    "water":      HSVRange(h_min=95,  s_min=60, v_min=60,  h_max=130, s_max=255, v_max=255),
-    "vegetation": HSVRange(h_min=40,  s_min=40, v_min=50,  h_max=85,  s_max=255, v_max=255),
-    "contours":   HSVRange(h_min=8,   s_min=70, v_min=60,  h_max=22,  s_max=220, v_max=210),
+    "water":      HSVRange(h_min=95,  s_min=60,  v_min=60,  h_max=130, s_max=255, v_max=255),
+    "vegetation": HSVRange(h_min=40,  s_min=40,  v_min=50,  h_max=85,  s_max=255, v_max=255),
+    # Courbes de niveau AMS/GSGS : brun pâle, S faible → S_min=40
+    "contours":   HSVRange(h_min=6,   s_min=40,  v_min=75,  h_max=25,  s_max=160, v_max=215),
+    # Routes rouges : rouge pur H=0-10, saturation élevée → squelettisé en lignes
+    "red_roads":  HSVRange(h_min=0,   s_min=90,  v_min=70,  h_max=10,  s_max=255, v_max=255),
+    # Bâtiments : gris foncé / anthracite, S faible, V faible
+    "buildings":  HSVRange(h_min=0,   s_min=0,   v_min=30,  h_max=180, s_max=50,  v_max=130),
 }
+
+# Plage supplémentaire pour le rouge cramoisi (H=170-180) utilisé sur certaines
+# cartes pour les routes secondaires. Fusionné avec red_roads dans extract_all_color_layers.
+_RED_ROADS_HIGH = HSVRange(h_min=170, s_min=90, v_min=70, h_max=180, s_max=255, v_max=255)
 
 
 # Le rouge en HSV traverse la jonction 0/180 → deux plages à combiner
@@ -153,15 +173,57 @@ def skeletonize_mask(mask: np.ndarray) -> np.ndarray:
     return skel
 
 
+def filter_skeleton_by_length(skeleton: np.ndarray, *,
+                               min_length_px: int = 50) -> np.ndarray:
+    """
+    Élimine les composantes connexes du squelette plus courtes que
+    `min_length_px` pixels. Évite les milliers de petits fragments
+    (transforme par exemple 7434 features bruitées en ~44 vraies courbes).
+
+    À utiliser APRÈS skeletonize_mask().
+    """
+    binary = (skeleton > 0).astype(np.uint8)
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    out = np.zeros_like(binary)
+    for i in range(1, num):
+        if stats[i, cv2.CC_STAT_AREA] >= min_length_px:
+            out[labels == i] = 255
+    return out
+
+
 # -----------------------------------------------------------
 # API haut niveau
 # -----------------------------------------------------------
+def _clean_thin_lines(mask: np.ndarray, *, min_area: int = 20) -> np.ndarray:
+    """
+    Nettoyage adapté aux lignes fines (courbes de niveau, 1-3 px de large).
+
+    Contrairement à clean_mask(), on N'APPLIQUE PAS de morphological open
+    (qui éroderait et détruirait les lignes minces). On applique uniquement :
+      - une fermeture 2x2 pour combler les micro-gaps d'1 px
+      - un filtrage par taille (supprime les composantes < min_area px)
+    """
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+    closed = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, k)
+    num, labels, stats, _ = cv2.connectedComponentsWithStats(closed, connectivity=8)
+    out = np.zeros_like(closed)
+    for i in range(1, num):
+        if stats[i, cv2.CC_STAT_AREA] >= min_area:
+            out[labels == i] = 255
+    return out
+
+
 def extract_all_color_layers(hsv: np.ndarray, *,
                               clean: bool = True,
                               skeletonize_contours: bool = True,
                               dense_filter_zones: bool = True,
                               density_window: int = 25,
                               density_threshold: float = 0.25,
+                              contour_min_area: int = 20,
+                              contour_min_skeleton_length: int = 50,
+                              red_min_skeleton_length: int = 30,
+                              ranges: Optional[Dict[str, HSVRange]] = None,
+                              red_roads_high: Optional[HSVRange] = None,
                               ) -> Dict[str, np.ndarray]:
     """
     Extrait toutes les couches colorimétriques standard d'une carte.
@@ -169,39 +231,59 @@ def extract_all_color_layers(hsv: np.ndarray, *,
     Arguments :
         clean : applique morphologie + filtrage par taille (défaut : oui).
         skeletonize_contours : transforme les courbes en squelette 1px.
-        dense_filter_zones : applique density_filter sur eau + végétation
-            (utile pour cartes avec quadrillage). Par défaut : oui.
+        dense_filter_zones : applique density_filter sur eau + végétation.
         density_window, density_threshold : voir density_filter().
+        contour_min_area : aire mini AVANT squelettisation des courbes.
+        contour_min_skeleton_length : longueur mini APRÈS squelettisation
+            (50 garde les vraies courbes, élimine les fragments parasites).
+        red_min_skeleton_length : idem pour les routes rouges (30 garde les
+            vraies routes même courtes).
     """
     layers: Dict[str, np.ndarray] = {}
+    active_ranges = ranges or DEFAULT_RANGES
+    active_red_high = red_roads_high or _RED_ROADS_HIGH
 
     # Plages "zones" (eau, végétation) : on veut des régions denses
     for name in ("water", "vegetation"):
-        rng = DEFAULT_RANGES[name]
+        rng = active_ranges[name]
         m = mask_from_range(hsv, rng)
         if clean:
             m = clean_mask(m, open_kernel=3, close_kernel=7, min_area=100)
         if dense_filter_zones:
             m = density_filter(m, window=density_window,
                                 min_density=density_threshold)
-            # Re-clean après filtrage (élimine les petites composantes orphelines)
             m = clean_mask(m, open_kernel=3, close_kernel=5, min_area=200)
         layers[name] = m
 
-    # Courbes de niveau : on veut des lignes, pas de density_filter
-    contour_raw = mask_from_range(hsv, DEFAULT_RANGES["contours"])
+    # Courbes de niveau : lignes fines (1-3px) → pas de morphological open
+    contour_raw = mask_from_range(hsv, active_ranges["contours"])
     if clean:
-        contour_raw = clean_mask(contour_raw, open_kernel=2,
-                                  close_kernel=3, min_area=30)
+        contour_raw = _clean_thin_lines(contour_raw, min_area=contour_min_area)
     if skeletonize_contours:
         contour_raw = skeletonize_mask(contour_raw)
+        # CRITIQUE : filtre par longueur APRÈS squelettisation
+        # (sans ça, on a 7434 fragments au lieu de 44 vraies courbes).
+        contour_raw = filter_skeleton_by_length(
+            contour_raw, min_length_px=contour_min_skeleton_length)
     layers["contours"] = contour_raw
 
-    # Routes rouges : lignes fines aussi → pas de density_filter
-    red_raw = mask_red(hsv)
+    # Routes rouges : fusion des deux plages rouge pur + cramoisi, puis squelettisation
+    # → LineStrings propres (pas de polygones de bord de route).
+    rd_low  = mask_from_range(hsv, active_ranges["red_roads"])
+    rd_high = mask_from_range(hsv, active_red_high)
+    rd_raw  = cv2.bitwise_or(rd_low, rd_high)
     if clean:
-        red_raw = clean_mask(red_raw, open_kernel=2, close_kernel=3, min_area=30)
-    layers["red_roads"] = red_raw
+        rd_raw = clean_mask(rd_raw, open_kernel=2, close_kernel=3, min_area=30)
+    rd_raw = skeletonize_mask(rd_raw)
+    rd_raw = filter_skeleton_by_length(rd_raw, min_length_px=red_min_skeleton_length)
+    layers["red_roads"] = rd_raw
+
+    # Bâtiments : polygones fermés — ouverture + fermeture standard
+    if "buildings" in active_ranges:
+        bld_raw = mask_from_range(hsv, active_ranges["buildings"])
+        if clean:
+            bld_raw = clean_mask(bld_raw, open_kernel=3, close_kernel=5, min_area=50)
+        layers["buildings"] = bld_raw
 
     return layers
 

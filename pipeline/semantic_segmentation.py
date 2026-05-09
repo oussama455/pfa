@@ -178,8 +178,22 @@ def predict_mask(model, image_rgb: np.ndarray,
 
 def predict_multi_class(model, image_rgb: np.ndarray,
                          class_names: Optional[List[str]] = None,
-                         device: Optional[str] = None) -> dict:
-    """Un masque uint8 par classe (hors fond), retourne {nom: masque}."""
+                         device: Optional[str] = None,
+                         include_class_zero: bool = True) -> dict:
+    """
+    Un masque uint8 par classe, retourne {nom: masque}.
+
+    class_names : un nom par classe DANS L'ORDRE DES INDEX du modele
+        (0, 1, 2, ...). Si la longueur est num_classes-1, on suppose que
+        tu as oublie la classe 0 et on la nomme 'background' (compat
+        retro avec l'ancien usage).
+
+    include_class_zero :
+        - True (defaut) : on retourne aussi le masque de la classe 0
+          (typiquement 'background' — utile pour debug ou pour le filtrer
+          dans l'appelant).
+        - False : on saute la classe 0 (ancien comportement).
+    """
     _require_torch()
     dev = device or get_device(verbose=False)
     model.to(dev).eval()
@@ -189,6 +203,15 @@ def predict_multi_class(model, image_rgb: np.ndarray,
         preds = torch.argmax(logits, dim=1).squeeze(0).cpu().numpy()
     n_classes = logits.shape[1]
     if class_names is None:
-        class_names = [f"class_{i}" for i in range(1, n_classes)]
+        class_names = [f"class_{i}" for i in range(n_classes)]
+    elif len(class_names) == n_classes - 1:
+        # Compat retro : on suppose que la classe 0 = background
+        class_names = ["background"] + list(class_names)
+    elif len(class_names) != n_classes:
+        raise ValueError(
+            f"len(class_names)={len(class_names)} ne correspond pas au "
+            f"nombre de classes du modele ({n_classes})."
+        )
+    start = 0 if include_class_zero else 1
     return {name: ((preds == idx) * 255).astype(np.uint8)
-            for idx, name in enumerate(class_names, start=1)}
+            for idx, name in enumerate(class_names) if idx >= start}

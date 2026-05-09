@@ -1,0 +1,53 @@
+{
+  "_comment": "Configuration du dataset SEMAP (Petitpierre 2025, EPFL).",
+  "_paper": "Generalizable Multiscale Segmentation of Heterogeneous Map Collections (arXiv 2603.05037)",
+  "_doi": "10.5281/zenodo.16164781",
+  "_license": "CC BY 4.0",
+
+  "external_root": "C:/Users/ochou/Documents/Claude/pfa/19048095",
+  "_external_root_note": "Dataset garde EXTERNE (2 GB) pour ne pas alourdir le repo Git. Si tu deplaces le dataset, modifie cette ligne et re-execute scripts/train_semap.py.",
+
+  "subdirs": {
+    "images_real":      "images/images/real",
+    "images_synthetic": "images/images/synthetic",
+    "labels_real":      "labels/labels/real",
+    "labels_synthetic": "labels/labels/synthetic",
+    "partitions":       "partitions/partitions",
+    "model":            "model/model"
+  },
+
+  "image_extension": ".jpg",
+  "label_extension": ".png",
+
+  "_label_format": "Single-channel PNG, uint8, valeurs 0-5 = index de classe direct (pas de palette couleur).",
+
+  "classes": [
+    {"id": 0, "name": "background",   "description": "Fond de la carte (papier)"},
+    {"id": 1, "name": "contours",     "description": "Lignes de contour, neatline, separateurs"},
+    {"id": 2, "name": "built",        "description": "Zones construites (batiments, ilots)"},
+    {"id": 3, "name": "non_built",    "description": "Espaces non construits (cours, parcs)"},
+    {"id": 4, "name": "water",        "description": "Hydrographie (rivieres, lacs, mer)"},
+    {"id": 5, "name": "road_network", "description": "Reseau de rues / routes"}
+  ],
+  "num_classes": 6,
+  "ignore_index": 255,
+
+  "_dataset_stats": {
+    "real_images":      1439,
+    "synthetic_images": 12122,
+    "train_size":       10703,
+    "val_size":         2712,
+    "test_size":        143,
+    "image_size_min":   768,
+    "image_size_max":   1000
+  },
+
+  "pretrained_model": {
+    "filename":         "best_mIoU_iter_138828.pth",
+    "size_mb":          908,
+    "architecture":     "Mask2Former Swin-L",
+    "config_filename":  "mask2former_swin-l-in22k-384x384-pre_8xb2-160k_ade20k-640x640.py",
+    "framework":        "mmsegmentation v1.2.2",
+    "_note":            "Modele lourd (908 MB). Utilisable directement via mmsegmentation, ou comme supervision pour un U-Net plus leger (knowledge distillation)."
+  }
+}

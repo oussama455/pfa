@@ -1,50 +1,67 @@
-# ===========================
-# PFA — Agent IA vectorisation
-# ===========================
-# Python 3.10+ recommandé
+# PFA - CartoVec dependencies
+# Python 3.10 recommended.
+#
+# Windows users: prefer `conda env create -f environment.yml` because GDAL,
+# rasterio, fiona and geopandas are easier to install through conda-forge.
+#
+# React/Vite frontend dependencies are managed separately in:
+#   webapp/frontend/package.json
 
-# --- Calcul scientifique ---
-numpy>=1.26
+# Scientific stack
+numpy>=1.26,<2.0
 scipy>=1.11
+pandas>=2.1
+openpyxl>=3.1
 
-# --- Vision par ordinateur classique ---
+# Computer vision
 opencv-python>=4.9
 scikit-image>=0.22
 Pillow>=10.2
 
-# --- Deep learning (U-Net pour routes/bâtiments) ---
-# Installe d'abord PyTorch avec CUDA selon ton GPU :
+# Deep learning
+# For CUDA, install PyTorch from the official CUDA index first:
 #   pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
 torch>=2.2
 torchvision>=0.17
 segmentation-models-pytorch>=0.3.3
 albumentations>=1.4
+timm>=0.9.16
 
-# --- Géomatique : raster ---
+# Geospatial raster/vector stack
 rasterio>=1.3
-# GDAL doit être installé au niveau système (voir README)
-
-# --- Géomatique : vecteur ---
 shapely>=2.0
 geopandas>=0.14
 fiona>=1.9
+pyogrio>=0.7
 pyproj>=3.6
 
-# --- Framework web ---
+# Web application and API
 Django>=5.0
+djangorestframework>=3.15
+django-cors-headers>=4.3
 django-leaflet>=0.30
 django-geojson>=4.0
 
-# --- Notebook et exploration ---
+# Agent workflow
+langgraph>=0.1.0
+langchain-core>=0.2.0
+
+# Notebooks and exploration
 jupyter>=1.0
+jupyterlab>=4.0
 matplotlib>=3.8
+seaborn>=0.13
 ipywidgets>=8.1
 
-# --- Utilitaires ---
+# Utilities
 tqdm>=4.66
 python-dotenv>=1.0
 pyyaml>=6.0
+rich>=13.0
 
-# --- Tests ---
+# Tests
 pytest>=8.0
 pytest-django>=4.8
+
+# Windows helper used for GDAL DLL path detection in Django settings.
+pywin32>=306; platform_system == "Windows"

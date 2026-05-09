@@ -1,0 +1,22 @@
+{
+  "name": "cartovec-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "@geoman-io/leaflet-geoman-free": "^2.18.3",
+    "@vitejs/plugin-react": "^4.2.1",
+    "axios": "^1.6.8",
+    "vite": "^5.2.0",
+    "leaflet": "^1.9.4",
+    "react": "^18.2.0",
+    "react-dom": "^18.2.0",
+    "react-leaflet": "^4.2.1"
+  },
+  "devDependencies": {}
+}

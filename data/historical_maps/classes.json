@@ -1,0 +1,42 @@
+{
+  "_comment": "Palette des labels du dataset SODUCO/Benchmark historical maps. Couleurs en BGR (convention OpenCV).",
+  "classes": [
+    {
+      "id": 0,
+      "name": "background",
+      "color_bgr": [255, 255, 255],
+      "color_hex": "#FFFFFF",
+      "description": "Fond de la carte"
+    },
+    {
+      "id": 1,
+      "name": "inside_blocks",
+      "color_bgr": [255, 255, 0],
+      "color_hex": "#00FFFF",
+      "description": "Interieur des ilots / batiments (cyan en BGR)"
+    },
+    {
+      "id": 2,
+      "name": "building_walls",
+      "color_bgr": [255, 0, 255],
+      "color_hex": "#FF00FF",
+      "description": "Contours de batiments (magenta)"
+    },
+    {
+      "id": 3,
+      "name": "street_network",
+      "color_bgr": [255, 0, 0],
+      "color_hex": "#0000FF",
+      "description": "Reseau de rues (bleu en BGR -> rouge RGB)"
+    },
+    {
+      "id": 4,
+      "name": "unknown",
+      "color_bgr": [0, 0, 0],
+      "color_hex": "#000000",
+      "description": "Zone non labellisee / bordure"
+    }
+  ],
+  "num_classes": 5,
+  "ignore_index": 4
+}

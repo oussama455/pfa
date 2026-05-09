@@ -1,7 +1,13 @@
+# CartoVec PFA - Windows/NVIDIA CUDA environment
+#
+# Recommended for RTX 2050 and Colab-like CUDA workflows.
+# PyTorch is installed from the official CUDA 12.1 wheel index.
+
 name: pfa
 channels:
   - conda-forge
   - defaults
+  - nodefaults
 dependencies:
   - python=3.10
 
@@ -16,7 +22,7 @@ dependencies:
   - scikit-image>=0.22
   - pillow>=10.2
 
-  # Geospatial stack
+  # Geospatial stack. Keep these in conda-forge on Windows.
   - gdal>=3.8
   - rasterio>=1.3
   - shapely>=2.0
@@ -50,11 +56,14 @@ dependencies:
 
   - pip
   - pip:
-      # CPU PyTorch by default. For CUDA, use environment_cuda.yml.
-      - torch>=2.2
-      - torchvision>=0.17
+      # Official CUDA 12.1 PyTorch wheels.
+      - --extra-index-url https://download.pytorch.org/whl/cu121
+      - torch==2.2.2+cu121
+      - torchvision==0.17.2+cu121
+
+      # Segmentation/training stack
       - segmentation-models-pytorch>=0.3.3
-      - albumentations>=1.4
+      - albumentations>=1.4.0
       - timm>=0.9.16
 
       # Agent workflow
@@ -65,5 +74,5 @@ dependencies:
       - django-leaflet>=0.30
       - django-geojson>=4.0
 
-      # Windows-only helper used by cartovec/settings.py when available.
+      # Windows helper used for GDAL DLL path detection.
       - pywin32>=306; platform_system == "Windows"

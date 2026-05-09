@@ -205,8 +205,19 @@ cython_debug/
 # Temporary file for partial code execution
 tempCodeRunnerFile.py
 
+# Local assistant/tool settings
+.claude/
+
 # Ruff stuff:
 .ruff_cache/
+
+# Node / frontend
+node_modules/
+webapp/frontend/dist/
+.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 
 # PyPI configuration file
 .pypirc
@@ -223,3 +234,38 @@ __marimo__/
 .conda/ 
 env/ 
 envs/ 
+
+# Project specific (media, generated maps, model artifacts)
+webapp/media/processed/
+webapp/media/uploads/
+webapp/staticfiles/
+data/processed/
+data/tmp/
+outputs/
+runs/
+
+# Generated vector/geospatial outputs
+*.geojson
+*.gpkg
+*.shp
+*.shx
+*.dbf
+*.prj
+*.cpg
+*.tif
+*.tiff
+*.png
+*.jpg
+
+# Model checkpoints and training logs
+external/weight/*.pth
+external/weight/*.pt
+external/weight/*.ckpt
+external/weight/*.log
+*.pth
+*.pt
+*.ckpt
+
+# Local backups
+*.bak
+.DS_Store

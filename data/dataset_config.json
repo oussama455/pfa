@@ -1,0 +1,80 @@
+{
+  "_comment": "Calibrated from 8 real military maps (Tunisia + Algeria, 1:50,000 WWII)",
+  "_maps_tested": [
+    "bizerte", "tunis", "ain-el-kseiba",
+    "ain-bessem", "alger", "terny", "warnier", "renault"
+  ],
+
+  "resolution": {
+    "typical_width_px":  [5720, 6719],
+    "typical_height_px": [3940, 5369],
+    "scale": "1:50000"
+  },
+
+  "frame_detection": {
+    "method":     "neatline",
+    "confidence": [0.99, 1.00],
+    "legend_width_px": [860, 1003],
+    "margin_top_bottom_px": [240, 636]
+  },
+
+  "hsv_ranges": {
+    "red_roads_primary": {
+      "note": "Routes principales rouges — 6-21% coverage",
+      "low1":  [0,   60, 60],
+      "high1": [15, 255, 255],
+      "low2":  [155,  60,  60],
+      "high2": [180, 255, 255],
+      "dilate_iterations": 2
+    },
+    "red_roads_secondary": {
+      "note": "Routes secondaires rouge foncé / bordeaux",
+      "low":  [0,   40,  40],
+      "high": [15, 255, 200]
+    },
+    "vegetation": {
+      "note": "Végétation verte — 2-35% (Terny: 35%)",
+      "low":  [35,  20,  50],
+      "high": [95, 255, 220]
+    },
+    "water_blue": {
+      "note": "Cours d'eau, lacs — faible %",
+      "low":  [95,  40,  40],
+      "high": [145, 255, 200]
+    },
+    "grid_purple_blue": {
+      "note": "Grille UTM/Lambert — 3-7% → à supprimer du masque",
+      "purple_low":  [120, 30, 80],
+      "purple_high": [165, 200, 220],
+      "blue_low":    [95,  30,  80],
+      "blue_high":   [130, 200, 220]
+    },
+    "background_beige": {
+      "note": "Fond beige crème uniforme",
+      "hue_median":   20,
+      "sat_median":   25,
+      "val_median":   225
+    }
+  },
+
+  "mask_parameters": {
+    "min_road_width_formula": "max(2, min(w, h) // 200)",
+    "min_road_width_typical_px": 17,
+    "min_component_area_px": 8,
+    "grid_fraction_threshold": 0.60,
+    "target_coverage_pct": [5, 55],
+    "expected_coverage_by_type": {
+      "road_dense":   [20, 35],
+      "road_sparse":  [5,  20],
+      "forest_map":   [35, 55]
+    }
+  },
+
+  "gt_classes": {
+    "roads":       {"color_bgr": [0,   0,  200], "hsv": "red_roads_primary"},
+    "buildings":   {"color_bgr": [50, 100, 220], "hsv": "dark_otsu_compact"},
+    "vegetation":  {"color_bgr": [30, 160,  30], "hsv": "vegetation"},
+    "water":       {"color_bgr": [200,  80,   0], "hsv": "water_blue"},
+    "combined_binary": {"note": "all features merged → 1 channel for U-Net"}
+  }
+}
