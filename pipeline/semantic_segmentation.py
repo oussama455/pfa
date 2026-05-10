@@ -138,14 +138,23 @@ def load_weights(model, weights_path: str | Path,
     weights_path = Path(weights_path)
     if not weights_path.exists():
         raise FileNotFoundError(f"Poids introuvables : {weights_path}")
+    
     dev = device or get_device(verbose=False)
-    state = torch.load(str(weights_path), map_location=dev)
+    
+    # التعديل هنا: إضافة weights_only=True لتجنب التحذير الأمني
+    try:
+        state = torch.load(str(weights_path), map_location=dev, weights_only=True)
+    except Exception:
+        # في حال فشل التحميل الآمن (بسبب بنية ملف قديمة)، نعود للطريقة العادية مع تنبيه
+        print("  Info: Chargement en mode weights_only=False pour compatibilité.")
+        state = torch.load(str(weights_path), map_location=dev, weights_only=False)
+        
     if isinstance(state, dict) and "state_dict" in state:
         state = state["state_dict"]
+        
     model.load_state_dict(state)
     model.to(dev).eval()
     return model
-
 
 # ---------------------------------------------------------------------
 # Inference
