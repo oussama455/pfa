@@ -42,31 +42,30 @@ def _run_pipeline_thread(upload_id: int) -> None:
         return
 
     try:
-        # ── Try LangGraph agent ────────────────────────────────────────────
+        # Appel direct du pipeline principal avec les mêmes arguments que la commande CLI
         try:
-            from pipeline.agent import run_agent
-            result = run_agent(
-                raster_path=str(upload.raster_path),
-                output_dir=str(upload.output_dir),
-                map_name=upload.map_name or None,
-                weights_path=_get_weights_path(),
+            from pipeline.pipeline import run_pipeline
+            result = run_pipeline(
+                str(upload.raster_path),
+                str(upload.output_dir),
+                with_semantic=True,
+                unet_weights=r"C:\Users\ochou\Documents\Claude\pfa\pfa.worktrees\dev-ses-pfa\external\weight\semap_unet_best.pth",
+                device=None,  # "auto" en CLI correspond à None ici
+                verbose=True
             )
+            # Marquer comme terminé (adapter selon la sortie de run_pipeline)
             upload.mark_done(
-                map_type=result.get("map_type"),
-                confidence_score=result.get("confidence_score"),
-                qa_passed=result.get("qa_passed", False),
-                retry_count=result.get("retry_count", 0),
-                georef_crs=result.get("georef_crs"),
-                raster_bounds=_extract_bounds(result),
+                map_type=getattr(result, "map_type", None),
+                confidence_score=getattr(result, "confidence_score", None),
+                qa_passed=getattr(result, "qa_passed", False),
+                retry_count=getattr(result, "retry_count", 0),
+                georef_crs=getattr(result, "georef_crs", None),
+                raster_bounds=None,
             )
-            logger.info("[tasks] Agent done map_id=%d score=%.3f",
-                        upload_id, result.get("confidence_score", 0.0))
-
+            logger.info("[tasks] Pipeline done map_id=%d", upload_id)
         except ImportError:
-            # ── Fallback: classic pipeline ─────────────────────────────────
-            logger.warning("[tasks] Fallback to classic pipeline map_id=%d", upload_id)
+            logger.warning("[tasks] pipeline import failed, fallback to classic pipeline map_id=%d", upload_id)
             _run_classic_pipeline(upload)
-
     except Exception as exc:
         logger.exception("[tasks] Pipeline failed map_id=%d: %s", upload_id, exc)
         upload.mark_failed(str(exc))
@@ -118,15 +117,25 @@ def _run_classic_pipeline(upload) -> None:
 
 
 def _get_weights_path():
+    import os
+    from pathlib import Path
+    
+    # المسار المطلق المباشر (الأكثر أماناً في ويندوز)
+    absolute_path = r"C:\Users\ochou\Documents\Claude\pfa\pfa.worktrees\dev-ses-pfa\external\weight\semap_unet_best.pth"
+    
+    if os.path.exists(absolute_path):
+        return absolute_path
+    
+    # حل احتياطي ديناميكي باستخدام PROJECT_ROOT من ملفك _path_setup
     try:
-        from shared.paths import Paths
-        p = Paths.unet_weights
-        return str(p) if p.is_file() else None
-    except ImportError:
-        from django.conf import settings
-        p = Path(settings.BASE_DIR).parent / "models" / "unet_tunis.pth"
-        return str(p) if p.is_file() else None
-
+        from . import _path_setup
+        dynamic_path = Path(_path_setup.PROJECT_ROOT) / "external" / "weight" / "semap_unet_best.pth"
+        if dynamic_path.is_file():
+            return str(dynamic_path)
+    except:
+        pass
+        
+    return None
 
 def _extract_bounds(agent_result):
     import json
