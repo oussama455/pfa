@@ -13,18 +13,44 @@ interface React/Vite avec Leaflet pour visualiser et corriger les resultats.
 
 - Pipeline image : pretraitement, segmentation couleur, segmentation U-Net,
   vectorisation, georeferencement et export GeoJSON.
+- Detection en 2 etapes du cadre cartographique : neatline (marge externe)
+  + legende interne (panneau droit). Calibre sur 8 cartes reelles
+  AMS/GSGS 1:50 000 Tunisie + Algerie : Bizerte, Tunis, Ain El Kseiba,
+  Ain Bessem, Alger, Terny, Warnier, Renault.
+- Plages HSV calibrees (`data/dataset_config.json`) : amelioration nette
+  de la detection des routes rouges (S_min 90 to 60) et de la vegetation
+  delavee (S_min 40 to 20).
 - Agent IA : perception, traitement, QA, auto-correction, georeferencement et
-  export avec journal d'audit.
+  export avec journal d'audit. Fallback automatique vers pipeline classique
+  si LangGraph est indisponible.
 - Active Learning : les corrections humaines ajustent progressivement les
-  plages HSV par serie de carte.
+  plages HSV par serie de carte (EMA alpha=0.3).
 - Backend Django : upload, suivi de statut, API REST, stockage des corrections
   et exposition des GeoJSON produits.
 - Frontend React/Vite : upload, liste des cartes, visualisation Leaflet,
   edition/suppression de features et panneau Active Learning.
-- Dataset SEMAP : chargeur PyTorch et scripts d'entrainement U-Net.
+- 2 datasets disponibles :
+  - SODUCO Benchmark (`data/historical_maps/`, 256 train + 49 eval,
+    5 classes BGR).
+  - SEMAP (Petitpierre 2025, 1 439 reelles + 12 122 synthetiques,
+    6 classes index-based, 13 561 echantillons au total).
+- Modele Mask2Former Swin-L pre-entraine fourni avec SEMAP (908 MB,
+  framework mmsegmentation, mIoU rapporte ~0.78).
 
 Le document de cadrage est disponible ici :
 [`PFA_Cadrage_Oussama_Chouaibi.docx`](./PFA_Cadrage_Oussama_Chouaibi.docx).
+
+## Quickstart (5 lignes)
+
+```bash
+conda env create -f environment.yml && conda activate pfa
+python scripts/diagnose_env.py                          # verifie l'env
+python -m pipeline.pipeline data/raw/carte.png -o data/processed
+cd webapp && python manage.py migrate && python manage.py runserver  &
+cd webapp/frontend && npm install && npm run dev
+```
+
+Puis ouvre [http://127.0.0.1:5173](http://127.0.0.1:5173).
 
 ## Arborescence
 
@@ -144,10 +170,27 @@ POST   /api/calibration/<series>/reset/
 
 ## Utilisation du pipeline seul
 
-Segmentation couleur et vectorisation :
+Segmentation couleur, vectorisation et detection 2-stages du cadre :
 
 ```bash
 python -m pipeline.pipeline data/raw/carte.png -o data/processed
+```
+
+Options CLI principales :
+
+```bash
+# Desactive la suppression de la legende interne (Stage 2)
+python -m pipeline.pipeline data/raw/carte.png --no-remove-legend
+
+# Desactive les plages HSV calibrees (utilise les valeurs generiques)
+python -m pipeline.pipeline data/raw/carte.png --no-calibrated-hsv
+
+# Recadrage manuel si la detection automatique echoue
+python -m pipeline.pipeline data/raw/carte.png --bbox 180 220 2400 1800
+
+# Force CPU ou GPU pour l'inference U-Net
+python -m pipeline.pipeline data/raw/carte.png --device cpu
+python -m pipeline.pipeline data/raw/carte.png --device cuda
 ```
 
 Avec segmentation semantique U-Net :
@@ -159,6 +202,11 @@ python -m pipeline.pipeline data/raw/carte.png ^
   --weights external/weight/semap_unet_best.pth ^
   --device auto
 ```
+
+Le pipeline detecte automatiquement le nombre de classes a charger selon le
+nom des poids : `semap_*.pth` -> 6 classes (SEMAP), sinon retombe sur les
+5 classes SODUCO si `data/historical_maps/classes.json` est present, sinon
+3 classes par defaut.
 
 Agent IA :
 
@@ -176,14 +224,34 @@ result = run_agent(
 print(result["output_geojsons"])
 ```
 
-## Dataset SEMAP
+## Datasets
 
-SEMAP est utilise pour entrainer un U-Net de segmentation semantique en
-6 classes :
+> Guide pas a pas detaille pour les 3 datasets : [`docs/datasets_guide.md`](./docs/datasets_guide.md)
 
-`background`, `contours`, `built`, `non_built`, `water`, `road_network`.
+### 1. SODUCO Benchmark (`data/historical_maps/`)
 
-Le dataset reste hors Git. Le chemin local est defini dans
+Dataset Paris BnF avec labels en couleurs BGR (palette via
+`data/historical_maps/classes.json`). 5 classes : `background`,
+`inside_blocks`, `building_walls`, `street_network`, `unknown`.
+
+- 256 images train + 49 eval
+- Resolution 1000x1000
+- Utilise par `scripts/train_mapseg.py`
+
+### 2. SEMAP (Petitpierre 2025, EPFL)
+
+Le plus gros dataset annote pour la segmentation de cartes historiques.
+6 classes index-based : `background`, `contours`, `built`, `non_built`,
+`water`, `road_network`.
+
+- 1 439 images reelles + 12 122 images synthetiques (13 561 total)
+- Splits officiels : 10 703 train / 2 712 val / 143 test
+- Resolution 768x768 a 1000x1000
+- Modele Mask2Former Swin-L pre-entraine fourni (908 MB)
+- Citation : Petitpierre R, Gomez Donoso D, Kriesel B (2025).
+  DOI 10.5281/zenodo.16164781
+
+Le dataset reste hors Git (2 GB). Le chemin local est defini dans
 [`data/semap_config.json`](./data/semap_config.json), champ `external_root`.
 
 Verifier le dataset :
@@ -193,17 +261,82 @@ from pipeline.semap_dataset import SemapDataset
 
 ds = SemapDataset(split="train", target_size=(512, 512), augment=True)
 print(ds.stats())
+# {'split': 'train', 'total': 10703, 'real': 1153, 'synthetic': 9550}
 ```
 
-Entrainer le modele :
+Entrainer un U-Net leger (compatible RTX 2050 4 GB) :
 
 ```bash
+# Tout le dataset (real + synthetic)
 python scripts/train_semap.py --epochs 20 --batch-size 8
-python scripts/train_semap.py --target-size 384 --batch-size 4
+
+# Uniquement les images reelles
 python scripts/train_semap.py --no-synthetic --epochs 30
+
+# Image plus petite pour GPU 4 GB
+python scripts/train_semap.py --target-size 384 --batch-size 4
 ```
 
-Les checkpoints sont ecrits dans `external/weight/` et ignores par Git.
+Les checkpoints sont ecrits dans `external/weight/` (ignores par Git).
+
+### 3. Mask2Former pre-entraine (option avancee)
+
+Utilisable directement via mmsegmentation pour de meilleurs scores
+(mIoU ~0.78 contre ~0.65 pour le U-Net). Necessite ~6 GB VRAM en
+inference -> Colab T4 recommande. Voir [`docs/semap_dataset.md`](./docs/semap_dataset.md).
+
+```bash
+pip install -U openmim
+mim install mmengine "mmcv>=2.0.0,<2.2.0" "mmsegmentation>=1.2.2"
+```
+
+---
+
+## Entraînement des datasets dans Google Colab
+
+Tu peux entraîner tous les modèles (U-Net, Mask2Former) sur Google Colab avec GPU/TPU. Voici comment faire :
+
+1. **Ouvre un notebook dans Colab** (ou dans VS Code avec le kernel Colab).
+2. **Clone le repo et installe les dépendances** :
+  ```python
+  from notebooks.colab_setup import setup
+
+  project_root = setup(
+     repo_url="https://github.com/<user>/pfa.git",
+     branch="main",
+     install=True,
+     use_drive=True,  # Recommandé pour les gros fichiers
+  )
+  ```
+  Place tes datasets dans `/content/drive/MyDrive/pfa/data/` si tu utilises Google Drive.
+3. **Lance l'entraînement** :
+  ```python
+  !python scripts/train_semap.py --epochs 20 --batch-size 8
+  ```
+  ou pour Mask2Former :
+  ```python
+  !pip install -U openmim
+  !mim install mmengine "mmcv>=2.0.0,<2.2.0" "mmsegmentation>=1.2.2"
+  # puis ton script d'entraînement avancé
+  ```
+
+Les checkpoints et résultats peuvent être sauvegardés sur Google Drive pour éviter toute perte.
+
+---
+
+### Cartes Tunisie + Algerie calibrees
+
+Le fichier [`data/dataset_config.json`](./data/dataset_config.json) contient
+les plages HSV calibrees sur 8 cartes militaires reelles (AMS/GSGS 1:50 000,
+WWII) :
+
+| Region | Cartes |
+|---|---|
+| Tunisie | Bizerte, Tunis, Ain El Kseiba |
+| Algerie | Ain Bessem, Alger, Terny, Warnier, Renault |
+
+Coverage observee : 14-50% selon densite. Activees par defaut via
+`--no-calibrated-hsv` pour les desactiver.
 
 ## Fichiers generes et Git
 
@@ -219,6 +352,20 @@ Les elements suivants ne doivent pas etre versionnes :
 
 `webapp/frontend/package-lock.json` doit etre conserve pour rendre les builds
 frontend reproductibles.
+
+## Diagnostics et tests
+
+Scripts utiles pour verifier ton installation :
+
+```bash
+python scripts/diagnose_env.py    # verifie cv2, rasterio, geopandas, GDAL, GPU
+python scripts/test_gpu.py        # benchmark forward U-Net CPU vs GPU
+```
+
+`diagnose_env.py` identifie precisement le module qui plante en cas de
+"DLL load failed" sous Windows. La cause la plus frequente sur Anaconda est
+un conflit entre pyogrio (backend GeoPandas) et fiona — `vectorization.py`
+bascule automatiquement de l'un a l'autre si le premier echoue.
 
 ## Google Colab
 

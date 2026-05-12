@@ -11,9 +11,11 @@ Endpoints:
 from __future__ import annotations
 
 import json
+import zipfile
 from pathlib import Path
 
 from django.conf import settings
+from django.http import FileResponse
 from django.shortcuts import get_object_or_404
 from rest_framework import serializers, status
 from rest_framework.decorators import api_view
@@ -195,6 +197,84 @@ class MapGeoJSONView(APIView):
             "crs":     "EPSG:4326",
             "layers":  layers,
         })
+
+
+class MapShapefileDownloadView(APIView):
+    """GET /api/maps/{pk}/shapefiles/ - download all layers as a ZIP."""
+
+    def get(self, request: Request, pk: int) -> Response | FileResponse:
+        upload = get_object_or_404(MapUpload, pk=pk)
+
+        if upload.status != "done":
+            return Response(
+                {
+                    "detail": f"Map is not yet processed (status={upload.status}).",
+                    "status": upload.status,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
+        output_dir = upload.output_dir
+        geojson_files = sorted(output_dir.glob("*.geojson"))
+        if not geojson_files:
+            return Response(
+                {"detail": "No GeoJSON layers found for this map."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            import geopandas as gpd
+            from pipeline.vectorization import save_shapefile
+        except Exception as exc:  # noqa: BLE001
+            return Response(
+                {"detail": f"Shapefile export dependencies are unavailable: {exc}"},
+                status=status.HTTP_503_SERVICE_UNAVAILABLE,
+            )
+
+        shapefile_dir = output_dir / "shapefiles"
+        shapefile_dir.mkdir(parents=True, exist_ok=True)
+
+        written_files: list[Path] = []
+        for geojson_file in geojson_files:
+            layer_dir = shapefile_dir / geojson_file.stem
+            layer_dir.mkdir(parents=True, exist_ok=True)
+            shp_path = layer_dir / f"{geojson_file.stem}.shp"
+            try:
+                gdf = gpd.read_file(geojson_file)
+                if gdf.empty:
+                    continue
+                save_shapefile(gdf, shp_path)
+                written_files.extend(sorted(layer_dir.glob(f"{geojson_file.stem}.*")))
+            except Exception as exc:  # noqa: BLE001
+                return Response(
+                    {
+                        "detail": (
+                            f"Failed to export layer '{geojson_file.stem}' "
+                            f"as Shapefile: {exc}"
+                        )
+                    },
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                )
+
+        if not written_files:
+            return Response(
+                {"detail": "No non-empty layers available for Shapefile export."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        zip_path = output_dir / f"map_{upload.pk}_shapefiles.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
+            for file_path in written_files:
+                archive.write(
+                    file_path,
+                    arcname=f"{file_path.parent.name}/{file_path.name}",
+                )
+
+        return FileResponse(
+            open(zip_path, "rb"),
+            as_attachment=True,
+            filename=f"cartovec_map_{upload.pk}_shapefiles.zip",
+        )
 
 
 class MapCorrectionsView(APIView):

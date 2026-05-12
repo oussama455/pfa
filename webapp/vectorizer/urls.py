@@ -3,7 +3,13 @@ webapp/vectorizer/urls.py — URL routing V2 (with Active Learning endpoints).
 """
 from django.urls import path
 from . import views
-from .api import MapListCreateView, MapDetailView, MapStatusView, MapGeoJSONView
+from .api import (
+    MapListCreateView,
+    MapDetailView,
+    MapStatusView,
+    MapGeoJSONView,
+    MapShapefileDownloadView,
+)
 from .api_v2 import (
     MapCorrectionsV2View,
     CalibrationStatusView,
@@ -24,6 +30,7 @@ urlpatterns = [
     path('api/maps/<int:pk>/',              MapDetailView.as_view(),       name='api-map-detail'),
     path('api/maps/<int:pk>/status/',       MapStatusView.as_view(),       name='api-map-status'),
     path('api/maps/<int:pk>/geojson/',      MapGeoJSONView.as_view(),      name='api-map-geojson'),
+    path('api/maps/<int:pk>/shapefiles/',   MapShapefileDownloadView.as_view(), name='api-map-shapefiles'),
     path('api/maps/<int:pk>/corrections/',  MapCorrectionsV2View.as_view(),name='api-corrections'),
 
     # ── REST API — Active Learning Calibration ────────────────────────────

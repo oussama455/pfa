@@ -1,19 +1,54 @@
 {
-  "_comment": "Calibrated from 8 real military maps (Tunisia + Algeria, 1:50,000 WWII)",
+  "_comment": "Calibrated for 2 map series : AMS Tunisia/Algeria 1:50,000 + UT Libraries TXU/PCL collection (German GSGS 1:25,000 + Italian + Iceland + various). 36 cartes au total.",
+
+  "series": {
+    "ams_algeria_tunisia": {
+      "_maps_tested": ["bizerte", "tunis", "ain-el-kseiba",
+                       "ain-bessem", "alger", "terny", "warnier", "renault"],
+      "scale": "1:50000",
+      "typical_width_px":  [5720, 6719],
+      "typical_height_px": [3940, 5369],
+      "neatline_color": "noir_epais",
+      "legend_location": "interne_droite",
+      "frame_detection_method": "contour_thr80"
+    },
+    "txu_pcl_collection": {
+      "_maps_tested": ["reykjavik", "trani", "lecce", "pisa", "san_remo",
+                       "buckeburg", "eckernforde", "kaiserswerth", "lohne",
+                       "markhausen", "neuss", "nieukerk", "wiedensahl",
+                       "wunstorf", "txu-oclc-6534349", "txu-oclc-6589697",
+                       "+ 12 autres txu-oclc-*"],
+      "_comment": "UT Libraries Perry-Castaneda Map Collection : German GSGS 8830990, Italian PCL, Iceland, etc. WWII et apres-guerre.",
+      "scale": ["1:25000", "1:50000", "1:100000"],
+      "typical_width_px":  [1790, 8934],
+      "typical_height_px": [1805, 7030],
+      "neatline_color": "noir_fin_ou_pale",
+      "legend_location": "variable_ou_externe",
+      "frame_detection_method": "cascade_multi_threshold + fallback_density",
+      "background_hsv_mean": [24, 30, 215],
+      "n_maps": 28
+    }
+  },
+
   "_maps_tested": [
     "bizerte", "tunis", "ain-el-kseiba",
     "ain-bessem", "alger", "terny", "warnier", "renault"
   ],
 
   "resolution": {
-    "typical_width_px":  [5720, 6719],
-    "typical_height_px": [3940, 5369],
-    "scale": "1:50000"
+    "typical_width_px":  [1790, 8934],
+    "typical_height_px": [1141, 7030],
+    "scale": "1:25000 a 1:100000"
   },
 
   "frame_detection": {
-    "method":     "neatline",
-    "confidence": [0.99, 1.00],
+    "method":     "cascade_neatline_then_density",
+    "dark_thresholds_cascade": [80, 110, 140, 170, 200],
+    "min_area_ratio_cascade":  [0.30, 0.24, 0.18, 0.12, 0.05],
+    "fallback_method": "content_density",
+    "fallback_content_threshold": 230,
+    "confidence_ams": [0.99, 1.00],
+    "confidence_txu": [0.95, 1.00],
     "legend_width_px": [860, 1003],
     "margin_top_bottom_px": [240, 636]
   },

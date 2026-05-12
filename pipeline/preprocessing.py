@@ -89,29 +89,64 @@ def normalize_illumination(image_bgr: np.ndarray) -> np.ndarray:
 # Stage 1 : Détection du cadre cartographique (neatline)
 # ════════════════════════════════════════════════════════════════════════════
 
-def detect_map_frame(image_bgr: np.ndarray, *,
-                     dark_threshold: int = 80,
-                     min_area_ratio: float = 0.30,
-                     max_area_ratio: float = 0.95,
-                     pad: int = 5,
-                     aspect_ratio_range: Tuple[float, float] = (0.5, 2.5),
-                     prefer_centered: bool = True,
-                     inner_margin_ratio: float = 0.015,
-                     ) -> Tuple[int, int, int, int]:
+def _detect_frame_by_content_density(image_bgr, *,
+                                       content_threshold: int = 230,
+                                       margin_ratio: float = 0.01,
+                                       min_content_ratio: float = 0.05):
     """
-    Détecte le cadre rectangulaire (neatline) de la zone cartographique.
+    Fallback : detecte le cadre par densite de contenu plutot que par contour.
 
-    NEW — inner_margin_ratio (défaut 1.5 %) :
-        Après détection du neatline, recule de inner_margin_ratio × largeur/hauteur
-        vers l'intérieur pour exclure :
-            • la ligne du neatline elle-même
-            • les tirets de graduation
-            • les numéros de coordonnées imprimés juste à l'intérieur
+    Idee : meme si le neatline n'est pas un contour ferme, le contenu utile
+    de la carte (encre coloree + lignes) occupe une zone centrale, alors
+    que les marges sont essentiellement du papier blanc/creme.
 
-        Calibré sur 8 cartes réelles : 1.5 % = ~86 px sur une carte 5 735 px
-        de large — couvre tous les éléments de bordure observés.
+    Algo :
+      1. Tout pixel dont gray < content_threshold (= "encre" ou couleur) est marque.
+      2. On somme par ligne et par colonne pour trouver les bornes ou le contenu
+         devient dense (>= min_content_ratio * dimension).
+      3. On retourne (x1, y1, x2, y2) en serrant ces bornes.
 
-    Retourne (x1, y1, x2, y2) en pixels.
+    Marche sur les cartes German GSGS 1:25000 ou la frame n'est qu'un trait
+    fin discontinu, mais le contenu de la carte est tres marque.
+    """
+    H, W = image_bgr.shape[:2]
+    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    content = (gray < content_threshold).astype(np.uint8)
+
+    # Lisse pour ignorer le bruit ponctuel
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    content = cv2.morphologyEx(content, cv2.MORPH_CLOSE, kernel)
+
+    row_sum = content.sum(axis=1)  # densite par ligne
+    col_sum = content.sum(axis=0)  # densite par colonne
+    row_thr = min_content_ratio * W
+    col_thr = min_content_ratio * H
+
+    rows_active = np.where(row_sum >= row_thr)[0]
+    cols_active = np.where(col_sum >= col_thr)[0]
+    if len(rows_active) == 0 or len(cols_active) == 0:
+        return None
+
+    y1, y2 = int(rows_active.min()), int(rows_active.max())
+    x1, x2 = int(cols_active.min()), int(cols_active.max())
+
+    # Marge de securite
+    mx = int(W * margin_ratio)
+    my = int(H * margin_ratio)
+    x1 = max(0, x1 + mx); y1 = max(0, y1 + my)
+    x2 = min(W, x2 - mx); y2 = min(H, y2 - my)
+
+    if x2 - x1 < 0.30 * W or y2 - y1 < 0.30 * H:
+        return None  # pas assez de contenu pour etre une carte valable
+    return (x1, y1, x2 - x1, y2 - y1)
+
+
+def _detect_frame_at_threshold(image_bgr, dark_threshold, min_area_ratio,
+                                  max_area_ratio, aspect_ratio_range,
+                                  morph_kernel_size: int = 5):
+    """
+    Implementation de bas niveau : binarise a `dark_threshold` et cherche
+    le meilleur contour rectangulaire. Retourne (x, y, w, h) ou None.
     """
     H, W = image_bgr.shape[:2]
     img_area = W * H
@@ -119,17 +154,17 @@ def detect_map_frame(image_bgr: np.ndarray, *,
 
     gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
     _, binary = cv2.threshold(gray, dark_threshold, 255, cv2.THRESH_BINARY_INV)
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT,
+                                        (morph_kernel_size, morph_kernel_size))
     binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
 
     contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL,
                                     cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        return (0, 0, W, H)
+        return None
 
     ar_min, ar_max = aspect_ratio_range
     candidates = []
-
     for cnt in contours:
         x, y, w, h = cv2.boundingRect(cnt)
         area = w * h
@@ -149,10 +184,89 @@ def detect_map_frame(image_bgr: np.ndarray, *,
         candidates.append((score, (x, y, w, h)))
 
     if not candidates:
+        return None
+    candidates.sort(key=lambda t: t[0], reverse=True)
+    return candidates[0][1]
+
+
+def detect_map_frame(image_bgr: np.ndarray, *,
+                     dark_threshold: int = 80,
+                     min_area_ratio: float = 0.30,
+                     max_area_ratio: float = 0.95,
+                     pad: int = 5,
+                     aspect_ratio_range: Tuple[float, float] = (0.5, 2.5),
+                     prefer_centered: bool = True,
+                     inner_margin_ratio: float = 0.015,
+                     retry_thresholds: Optional[Tuple[int, ...]] = (110, 140, 170, 200),
+                     adaptive_min_area: bool = True,
+                     min_area_floor: float = 0.05,
+                     ) -> Tuple[int, int, int, int]:
+    """
+    Detecte le cadre rectangulaire (neatline) de la zone cartographique.
+
+    Strategie en cascade pour couvrir plusieurs styles cartographiques :
+
+    1. Premier essai au `dark_threshold` standard (80) avec `min_area_ratio=0.30`.
+       Marche sur les cartes AMS / GSGS Tunisie+Algerie qui ont un neatline noir epais.
+
+    2. Si echec : retry sur `retry_thresholds=(110, 140, 170)` qui captent les
+       neatlines plus pales des cartes TXU / UT Libraries (German GSGS,
+       Italian, Reykjavik, etc.) ou la frame est imprimee en gris plutot que noir.
+
+    3. Si `adaptive_min_area=True` : a chaque retry on baisse aussi
+       `min_area_ratio` (0.30 -> 0.20 -> 0.15 -> 0.10) pour tolerer les
+       cartes dont la frame n'occupe que 50-70% de l'image scannee.
+
+    NEW — `inner_margin_ratio` (defaut 1.5%) :
+        Apres detection du neatline, recule de inner_margin_ratio × largeur/hauteur
+        vers l'interieur pour exclure les tirets de graduation et les
+        numeros de coordonnees imprimes juste a l'interieur.
+
+    Retourne (x1, y1, x2, y2) en pixels. Si aucun cadre trouve, retourne l'image entiere.
+    """
+    H, W = image_bgr.shape[:2]
+
+    # Construit la liste des (threshold, min_area_ratio) a essayer.
+    # On commence strict (peu de faux positifs) puis on relache progressivement.
+    thresholds_to_try = [(dark_threshold, min_area_ratio)]
+    if retry_thresholds:
+        if adaptive_min_area:
+            # Decroissance lineaire de min_area_ratio jusqu'a min_area_floor.
+            n = len(retry_thresholds)
+            step = (min_area_ratio - min_area_floor) / max(n, 1)
+            for i, thr in enumerate(retry_thresholds, start=1):
+                mar = max(min_area_floor, min_area_ratio - i * step)
+                thresholds_to_try.append((thr, mar))
+        else:
+            for thr in retry_thresholds:
+                thresholds_to_try.append((thr, min_area_ratio))
+
+    bbox_inner = None
+    used_thr = None
+    used_mar = None
+    for thr, mar in thresholds_to_try:
+        bbox_inner = _detect_frame_at_threshold(
+            image_bgr, dark_threshold=thr, min_area_ratio=mar,
+            max_area_ratio=max_area_ratio,
+            aspect_ratio_range=aspect_ratio_range,
+        )
+        if bbox_inner is not None:
+            used_thr, used_mar = thr, mar
+            break
+
+    used_method = "neatline_contour"
+    if bbox_inner is None:
+        # Fallback : detection par densite de contenu (utile pour les cartes
+        # German GSGS dont le neatline est compose de traits separes).
+        logger.debug(f"Neatline contour-based echoue ; essai fallback densite...")
+        bbox_inner = _detect_frame_by_content_density(image_bgr)
+        used_method = "content_density"
+
+    if bbox_inner is None:
+        logger.debug(f"Aucune frame detectee, retour image entiere")
         return (0, 0, W, H)
 
-    candidates.sort(key=lambda t: t[0], reverse=True)
-    _, (x, y, w, h) = candidates[0]
+    x, y, w, h = bbox_inner
 
     # Inner margin : neatline border + ticks + coord numbers
     inner_x = max(pad, int(W * inner_margin_ratio))
@@ -162,7 +276,8 @@ def detect_map_frame(image_bgr: np.ndarray, *,
     x2 = min(W, x + w - inner_x)
     y2 = min(H, y + h - inner_y)
 
-    logger.debug(f"Neatline: ({x1},{y1})→({x2},{y2}) inner_margin=({inner_x},{inner_y})px")
+    logger.debug(f"Neatline: ({x1},{y1})->({x2},{y2}) "
+                 f"[thr={used_thr}, min_area={used_mar}]")
     return (x1, y1, x2, y2)
 
 

@@ -34,6 +34,7 @@ function App() {
   const [selectedMap, setSelectedMap] = useState(null);
   const [loading, setLoading] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState("");
   const [form, setForm] = useState({ title: "", map_name: "", raster: null });
 
@@ -109,6 +110,39 @@ function App() {
       setError(err.response?.data?.detail || err.message);
     } finally {
       setUploading(false);
+    }
+  };
+
+  const handleShapefileDownload = async () => {
+    if (!selected) return;
+
+    setDownloading(true);
+    try {
+      const { data } = await axios.get(`${API_BASE}/maps/${selected.id}/shapefiles/`, {
+        responseType: "blob",
+      });
+      const url = window.URL.createObjectURL(data);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `cartovec_map_${selected.id}_shapefiles.zip`;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.URL.revokeObjectURL(url);
+      setError("");
+    } catch (err) {
+      if (err.response?.data instanceof Blob) {
+        try {
+          const payload = JSON.parse(await err.response.data.text());
+          setError(payload.detail || err.message);
+        } catch {
+          setError(err.message);
+        }
+      } else {
+        setError(err.response?.data?.detail || err.message);
+      }
+    } finally {
+      setDownloading(false);
     }
   };
 
@@ -197,7 +231,22 @@ function App() {
                   )}
                 </p>
               </div>
-              <span className={`status ${selected.status}`}>{statusLabel(selected.status)}</span>
+              <div className="workspace-actions">
+                <button
+                  type="button"
+                  className="download-button"
+                  onClick={handleShapefileDownload}
+                  disabled={selected.status !== "done" || downloading}
+                  title={
+                    selected.status === "done"
+                      ? "Telecharger les couches au format Shapefile"
+                      : "Le traitement doit etre termine avant l'export Shapefile"
+                  }
+                >
+                  {downloading ? "Preparation..." : "Installer les shapefiles"}
+                </button>
+                <span className={`status ${selected.status}`}>{statusLabel(selected.status)}</span>
+              </div>
             </header>
 
             {selected.error_message && (

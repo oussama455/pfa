@@ -220,6 +220,34 @@ input {
   font-size: 20px;
 }
 
+.workspace-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.download-button {
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 8px 11px;
+  color: var(--accent-strong);
+  background: #f2fbfb;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.download-button:hover:not(:disabled) {
+  background: #dff4f4;
+}
+
+.download-button:disabled {
+  border-color: var(--line);
+  color: var(--muted);
+  background: #f3f6f8;
+  cursor: not-allowed;
+}
+
 .viewer-panel {
   min-height: 0;
   flex: 1;
@@ -261,6 +289,11 @@ input {
 
   .workspace {
     min-height: 720px;
+  }
+
+  .workspace-header {
+    align-items: flex-start;
+    flex-direction: column;
   }
 }
 
