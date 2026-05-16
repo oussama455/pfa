@@ -370,50 +370,17 @@ def mask_to_geodataframe(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Step 5 — Export helpers
+# Step 5 — Export helpers (DEDUPLICATED : on reutilise pipeline.vectorization)
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _detect_io_engine() -> str:
-    """Auto-detect best geopandas I/O backend (pyogrio > fiona)."""
-    for engine in ("pyogrio", "fiona"):
-        try:
-            __import__(engine)
-            return engine
-        except (ImportError, OSError):
-            continue
-    raise RuntimeError(
-        "No geopandas I/O backend available. "
-        "Install: conda install -c conda-forge pyogrio  OR  pip install fiona"
-    )
-
-
-def save_geojson(gdf: "gpd.GeoDataFrame", path: str | Path) -> Path:
-    """Save GeoDataFrame as GeoJSON with automatic engine fallback."""
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    engine = _detect_io_engine()
-    gdf.to_file(path, driver="GeoJSON", engine=engine)
-    logger.info("[cc_postprocess] GeoJSON saved: %s (%d features)", path, len(gdf))
-    return path
-
-
-def save_shapefile(gdf: "gpd.GeoDataFrame", path: str | Path) -> Path:
-    """
-    Save GeoDataFrame as ESRI Shapefile.
-
-    Note on CRS in Shapefile:
-        The .prj file is written automatically from gdf.crs.
-        For QGIS compatibility, ensure crs is set before calling this:
-            gdf = gdf.set_crs("EPSG:4326")
-            # or for metric Tunisia:
-            gdf = gdf.set_crs("EPSG:32632")
-    """
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    engine = _detect_io_engine()
-    gdf.to_file(path, driver="ESRI Shapefile", engine=engine)
-    logger.info("[cc_postprocess] Shapefile saved: %s (%d features)", path, len(gdf))
-    return path
+# Re-export depuis pipeline.vectorization pour eviter la duplication.
+# Les fonctions sont identiques mais centralisees la-bas (avec fallback
+# pyogrio -> fiona, gestion des erreurs DLL Windows, etc.).
+from pipeline.vectorization import (  # noqa: F401
+    _detect_io_engine,
+    save_geojson,
+    save_shapefile,
+)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

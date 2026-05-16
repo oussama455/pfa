@@ -1,78 +1,13 @@
-# CartoVec PFA - Windows/NVIDIA CUDA environment
+# DEPRECATED -- ce fichier a ete fusionne dans environment.yml.
 #
-# Recommended for RTX 2050 and Colab-like CUDA workflows.
-# PyTorch is installed from the official CUDA 12.1 wheel index.
-
-name: pfa
-channels:
-  - conda-forge
-  - defaults
-  - nodefaults
-dependencies:
-  - python=3.10
-
-  # Scientific stack
-  - numpy>=1.26,<2.0
-  - scipy>=1.11
-  - pandas>=2.1
-  - openpyxl>=3.1
-
-  # Computer vision
-  - opencv>=4.9
-  - scikit-image>=0.22
-  - pillow>=10.2
-
-  # Geospatial stack. Keep these in conda-forge on Windows.
-  - gdal>=3.8
-  - rasterio>=1.3
-  - shapely>=2.0
-  - geopandas>=0.14
-  - fiona>=1.9
-  - pyogrio>=0.7
-  - pyproj>=3.6
-
-  # Web/API
-  - django>=5.0
-  - djangorestframework>=3.15
-  - django-cors-headers>=4.3
-  - nodejs>=20
-
-  # Notebooks
-  - jupyter>=1.0
-  - jupyterlab>=4.0
-  - matplotlib>=3.8
-  - seaborn>=0.13
-  - ipywidgets>=8.1
-
-  # Utilities
-  - tqdm>=4.66
-  - python-dotenv>=1.0
-  - pyyaml>=6.0
-  - rich>=13.0
-
-  # Tests
-  - pytest>=8.0
-  - pytest-django>=4.8
-
-  - pip
-  - pip:
-      # Official CUDA 12.1 PyTorch wheels.
-      - --extra-index-url https://download.pytorch.org/whl/cu121
-      - torch==2.2.2+cu121
-      - torchvision==0.17.2+cu121
-
-      # Segmentation/training stack
-      - segmentation-models-pytorch>=0.3.3
-      - albumentations>=1.4.0
-      - timm>=0.9.16
-
-      # Agent workflow
-      - langgraph>=0.1.0
-      - langchain-core>=0.2.0
-
-      # Django addons
-      - django-leaflet>=0.30
-      - django-geojson>=4.0
-
-      # Windows helper used for GDAL DLL path detection.
-      - pywin32>=306; platform_system == "Windows"
+# Pour installer avec support CUDA, suis les instructions en tete
+# de environment.yml :
+#
+#     conda env create -f environment.yml
+#     conda activate pfa
+#     pip uninstall -y torch torchvision
+#     pip install torch==2.2.2 torchvision==0.17.2 \
+#         --index-url https://download.pytorch.org/whl/cu121
+#
+# Ce fichier sera supprime lors du prochain nettoyage du repo
+# (`git rm environment_cuda.yml`).

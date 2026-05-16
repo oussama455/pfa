@@ -186,7 +186,7 @@ DEFAULT_ADAPTIVE_RANGES: Dict[str, Dict[str, AdaptiveHSVRange]] = {
 def _registry_path() -> Path:
     """Returns the path to the HSV registry JSON file."""
     try:
-        from shared.paths import Paths
+        from pipeline.paths import Paths
         return Paths.data / REGISTRY_FILENAME
     except ImportError:
         return Path(__file__).resolve().parent.parent / "data" / REGISTRY_FILENAME

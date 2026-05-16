@@ -17,7 +17,7 @@ interface React/Vite avec Leaflet pour visualiser et corriger les resultats.
   + legende interne (panneau droit). Calibre sur 8 cartes reelles
   AMS/GSGS 1:50 000 Tunisie + Algerie : Bizerte, Tunis, Ain El Kseiba,
   Ain Bessem, Alger, Terny, Warnier, Renault.
-- Plages HSV calibrees (`data/dataset_config.json`) : amelioration nette
+- Plages HSV calibrees (`data/config.json`) : amelioration nette
   de la detection des routes rouges (S_min 90 to 60) et de la vegetation
   delavee (S_min 40 to 20).
 - Agent IA : perception, traitement, QA, auto-correction, georeferencement et
@@ -44,7 +44,7 @@ Le document de cadrage est disponible ici :
 
 ```bash
 conda env create -f environment.yml && conda activate pfa
-python scripts/diagnose_env.py                          # verifie l'env
+python scripts/diagnose.py --check env                          # verifie l'env
 python -m pipeline.pipeline data/raw/carte.png -o data/processed
 cd webapp && python manage.py migrate && python manage.py runserver  &
 cd webapp/frontend && npm install && npm run dev
@@ -58,11 +58,9 @@ Puis ouvre [http://127.0.0.1:5173](http://127.0.0.1:5173).
 pfa/
 |-- README.md
 |-- requirements.txt
-|-- environment.yml
-|-- environment_cuda.yml
+|-- environment.yml               # env conda unifie (CPU + instructions CUDA)
 |-- data/
-|   |-- dataset_config.json       # configuration HSV canonique
-|   |-- semap_config.json         # chemin local du dataset SEMAP
+|   |-- config.json               # config unifiee (HSV, frame_detection, semap, soduco)
 |   |-- raw/                      # cartes raster d'entree, hors Git
 |   |-- processed/                # sorties generees, hors Git
 |-- docs/
@@ -93,13 +91,16 @@ python -m ipykernel install --user --name pfa --display-name "Python (pfa)"
 ### GPU NVIDIA / CUDA 12.1
 
 ```bash
-conda env create -f environment_cuda.yml
+conda env create -f environment.yml
 conda activate pfa
-python scripts/test_gpu.py
+pip uninstall -y torch torchvision
+pip install torch==2.2.2 torchvision==0.17.2 \
+    --index-url https://download.pytorch.org/whl/cu121
+python scripts/diagnose.py --check gpu
 ```
 
-`environment_cuda.yml` installe PyTorch CUDA 12.1 depuis l'index officiel
-PyTorch. Si CUDA n'est pas disponible, le pipeline peut retomber sur CPU.
+L'ancien `environment_cuda.yml` a ete fusionne dans `environment.yml` —
+la difference CUDA/CPU se gere par les commandes pip ci-dessus.
 
 ### Alternative pip
 
@@ -236,7 +237,7 @@ Dataset Paris BnF avec labels en couleurs BGR (palette via
 
 - 256 images train + 49 eval
 - Resolution 1000x1000
-- Utilise par `scripts/train_mapseg.py`
+- Utilise par `scripts/train.py --dataset soduco`
 
 ### 2. SEMAP (Petitpierre 2025, EPFL)
 
@@ -252,7 +253,7 @@ Le plus gros dataset annote pour la segmentation de cartes historiques.
   DOI 10.5281/zenodo.16164781
 
 Le dataset reste hors Git (2 GB). Le chemin local est defini dans
-[`data/semap_config.json`](./data/semap_config.json), champ `external_root`.
+[`data/config.json (bloc `semap`)`](./data/config.json (bloc `semap`)), champ `external_root`.
 
 Verifier le dataset :
 
@@ -268,13 +269,13 @@ Entrainer un U-Net leger (compatible RTX 2050 4 GB) :
 
 ```bash
 # Tout le dataset (real + synthetic)
-python scripts/train_semap.py --epochs 20 --batch-size 8
+python scripts/train.py --dataset semap --epochs 20 --batch-size 8
 
 # Uniquement les images reelles
-python scripts/train_semap.py --no-synthetic --epochs 30
+python scripts/train.py --dataset semap --no-synthetic --epochs 30
 
 # Image plus petite pour GPU 4 GB
-python scripts/train_semap.py --target-size 384 --batch-size 4
+python scripts/train.py --dataset semap --target-size 384 --batch-size 4
 ```
 
 Les checkpoints sont ecrits dans `external/weight/` (ignores par Git).
@@ -311,7 +312,7 @@ Tu peux entraîner tous les modèles (U-Net, Mask2Former) sur Google Colab avec 
   Place tes datasets dans `/content/drive/MyDrive/pfa/data/` si tu utilises Google Drive.
 3. **Lance l'entraînement** :
   ```python
-  !python scripts/train_semap.py --epochs 20 --batch-size 8
+  !python scripts/train.py --dataset semap --epochs 20 --batch-size 8
   ```
   ou pour Mask2Former :
   ```python
@@ -326,7 +327,7 @@ Les checkpoints et résultats peuvent être sauvegardés sur Google Drive pour �
 
 ### Cartes Tunisie + Algerie calibrees
 
-Le fichier [`data/dataset_config.json`](./data/dataset_config.json) contient
+Le fichier [`data/config.json`](./data/config.json) contient
 les plages HSV calibrees sur 8 cartes militaires reelles (AMS/GSGS 1:50 000,
 WWII) :
 
@@ -358,8 +359,8 @@ frontend reproductibles.
 Scripts utiles pour verifier ton installation :
 
 ```bash
-python scripts/diagnose_env.py    # verifie cv2, rasterio, geopandas, GDAL, GPU
-python scripts/test_gpu.py        # benchmark forward U-Net CPU vs GPU
+python scripts/diagnose.py --check env    # verifie cv2, rasterio, geopandas, GDAL, GPU
+python scripts/diagnose.py --check gpu        # benchmark forward U-Net CPU vs GPU
 ```
 
 `diagnose_env.py` identifie precisement le module qui plante en cas de

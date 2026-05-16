@@ -82,6 +82,23 @@ class PipelineResult:
         return json.dumps(asdict(self), indent=2, ensure_ascii=False)
 
 
+def _load_semap_config(project_root: Path) -> dict | None:
+    """Load SEMAP config from unified data/config.json, with legacy fallback."""
+    unified_cfg = project_root / "data" / "config.json"
+    if unified_cfg.exists():
+        cfg = json.loads(unified_cfg.read_text(encoding="utf-8"))
+        semap_cfg = cfg.get("semap")
+        if semap_cfg:
+            return semap_cfg
+
+    legacy_cfg = project_root / "data" / "semap_config.json"
+    if legacy_cfg.exists():
+        cfg = json.loads(legacy_cfg.read_text(encoding="utf-8"))
+        if "num_classes" in cfg and "classes" in cfg:
+            return cfg
+    return None
+
+
 def run_pipeline(input_path: str | Path,
                  output_dir: str | Path,
                  *,
@@ -149,13 +166,13 @@ def run_pipeline(input_path: str | Path,
 
         # Auto-detecte le nombre de classes : SEMAP (6) > historical_maps (5) > defaut (3)
         project_root = Path(__file__).resolve().parent.parent
-        semap_cfg  = project_root / "data" / "semap_config.json"
         hm_cfg     = project_root / "data" / "historical_maps" / "classes.json"
 
         n_classes = 3
         class_names = ["background", "roads", "buildings"]
-        if semap_cfg.exists() and unet_weights and "semap" in str(unet_weights).lower():
-            cfg = json.loads(semap_cfg.read_text(encoding="utf-8"))
+        semap_cfg = _load_semap_config(project_root)
+        if semap_cfg and unet_weights and "semap" in str(unet_weights).lower():
+            cfg = semap_cfg
             n_classes = cfg["num_classes"]
             class_names = [c["name"] for c in cfg["classes"]]
             if verbose:

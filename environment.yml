@@ -1,3 +1,20 @@
+# CartoVec PFA — environnement Conda unifie (CPU par defaut)
+#
+# Installation rapide :
+#     conda env create -f environment.yml
+#     conda activate pfa
+#
+# Pour activer le GPU NVIDIA (RTX 2050 / Colab T4), apres l'install ci-dessus :
+#     pip uninstall -y torch torchvision
+#     pip install torch==2.2.2 torchvision==0.17.2 \
+#         --index-url https://download.pytorch.org/whl/cu121
+#
+# Verification :
+#     python scripts/diagnose_env.py
+#
+# Ce fichier remplace l'ancien environment_cuda.yml — la difference CUDA / CPU
+# se gere via la commande pip ci-dessus, pas via un fichier YAML separe.
+
 name: pfa
 channels:
   - conda-forge
@@ -16,7 +33,7 @@ dependencies:
   - scikit-image>=0.22
   - pillow>=10.2
 
-  # Geospatial stack
+  # Geospatial stack (conda-forge essentiel sur Windows)
   - gdal>=3.8
   - rasterio>=1.3
   - shapely>=2.0
@@ -25,7 +42,7 @@ dependencies:
   - pyogrio>=0.7
   - pyproj>=3.6
 
-  # Web/API
+  # Web / API
   - django>=5.0
   - djangorestframework>=3.15
   - django-cors-headers>=4.3
@@ -50,14 +67,16 @@ dependencies:
 
   - pip
   - pip:
-      # CPU PyTorch by default. For CUDA, use environment_cuda.yml.
+      # PyTorch CPU par defaut. Voir l'en-tete pour activer la CUDA.
       - torch>=2.2
       - torchvision>=0.17
+
+      # Stack segmentation / entrainement
       - segmentation-models-pytorch>=0.3.3
       - albumentations>=1.4
       - timm>=0.9.16
 
-      # Agent workflow
+      # Agent LangGraph (optionnel ; fallback automatique si absent)
       - langgraph>=0.1.0
       - langchain-core>=0.2.0
 
@@ -65,5 +84,5 @@ dependencies:
       - django-leaflet>=0.30
       - django-geojson>=4.0
 
-      # Windows-only helper used by cartovec/settings.py when available.
+      # Windows : helper utilise par cartovec/settings.py pour DLL GDAL.
       - pywin32>=306; platform_system == "Windows"

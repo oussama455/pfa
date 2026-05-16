@@ -1,0 +1,358 @@
+{
+  "_comment": "Configuration unifiee CartoVec. Fusion de dataset_config.json + semap_config.json + classes.json. Acceder via les helpers de pipeline/paths.py si possible.",
+  "_version": 2,
+  "frame_detection": {
+    "method": "cascade_neatline_then_density",
+    "dark_thresholds_cascade": [
+      80,
+      110,
+      140,
+      170,
+      200
+    ],
+    "min_area_ratio_cascade": [
+      0.3,
+      0.24,
+      0.18,
+      0.12,
+      0.05
+    ],
+    "fallback_method": "content_density",
+    "fallback_content_threshold": 230,
+    "confidence_ams": [
+      0.99,
+      1.0
+    ],
+    "confidence_txu": [
+      0.95,
+      1.0
+    ],
+    "legend_width_px": [
+      860,
+      1003
+    ],
+    "margin_top_bottom_px": [
+      240,
+      636
+    ]
+  },
+  "hsv_ranges": {
+    "red_roads_primary": {
+      "note": "Routes principales rouges — 6-21% coverage",
+      "low1": [
+        0,
+        60,
+        60
+      ],
+      "high1": [
+        15,
+        255,
+        255
+      ],
+      "low2": [
+        155,
+        60,
+        60
+      ],
+      "high2": [
+        180,
+        255,
+        255
+      ],
+      "dilate_iterations": 2
+    },
+    "red_roads_secondary": {
+      "note": "Routes secondaires rouge foncé / bordeaux",
+      "low": [
+        0,
+        40,
+        40
+      ],
+      "high": [
+        15,
+        255,
+        200
+      ]
+    },
+    "vegetation": {
+      "note": "Végétation verte — 2-35% (Terny: 35%)",
+      "low": [
+        35,
+        20,
+        50
+      ],
+      "high": [
+        95,
+        255,
+        220
+      ]
+    },
+    "water_blue": {
+      "note": "Cours d'eau, lacs — faible %",
+      "low": [
+        95,
+        40,
+        40
+      ],
+      "high": [
+        145,
+        255,
+        200
+      ]
+    },
+    "grid_purple_blue": {
+      "note": "Grille UTM/Lambert — 3-7% → à supprimer du masque",
+      "purple_low": [
+        120,
+        30,
+        80
+      ],
+      "purple_high": [
+        165,
+        200,
+        220
+      ],
+      "blue_low": [
+        95,
+        30,
+        80
+      ],
+      "blue_high": [
+        130,
+        200,
+        220
+      ]
+    },
+    "background_beige": {
+      "note": "Fond beige crème uniforme",
+      "hue_median": 20,
+      "sat_median": 25,
+      "val_median": 225
+    }
+  },
+  "mask_parameters": {
+    "min_road_width_formula": "max(2, min(w, h) // 200)",
+    "min_road_width_typical_px": 17,
+    "min_component_area_px": 8,
+    "grid_fraction_threshold": 0.6,
+    "target_coverage_pct": [
+      5,
+      55
+    ],
+    "expected_coverage_by_type": {
+      "road_dense": [
+        20,
+        35
+      ],
+      "road_sparse": [
+        5,
+        20
+      ],
+      "forest_map": [
+        35,
+        55
+      ]
+    }
+  },
+  "gt_classes": {
+    "roads": {
+      "color_bgr": [
+        0,
+        0,
+        200
+      ],
+      "hsv": "red_roads_primary"
+    },
+    "buildings": {
+      "color_bgr": [
+        50,
+        100,
+        220
+      ],
+      "hsv": "dark_otsu_compact"
+    },
+    "vegetation": {
+      "color_bgr": [
+        30,
+        160,
+        30
+      ],
+      "hsv": "vegetation"
+    },
+    "water": {
+      "color_bgr": [
+        200,
+        80,
+        0
+      ],
+      "hsv": "water_blue"
+    },
+    "combined_binary": {
+      "note": "all features merged → 1 channel for U-Net"
+    }
+  },
+  "series": {
+    "ams_algeria_tunisia": {
+      "_maps_tested": [
+        "bizerte",
+        "tunis",
+        "ain-el-kseiba",
+        "ain-bessem",
+        "alger",
+        "terny",
+        "warnier",
+        "renault"
+      ],
+      "scale": "1:50000",
+      "typical_width_px": [
+        5720,
+        6719
+      ],
+      "typical_height_px": [
+        3940,
+        5369
+      ],
+      "neatline_color": "noir_epais",
+      "legend_location": "interne_droite",
+      "frame_detection_method": "contour_thr80"
+    },
+    "txu_pcl_collection": {
+      "_maps_tested": [
+        "reykjavik",
+        "trani",
+        "lecce",
+        "pisa",
+        "san_remo",
+        "buckeburg",
+        "eckernforde",
+        "kaiserswerth",
+        "lohne",
+        "markhausen",
+        "neuss",
+        "nieukerk",
+        "wiedensahl",
+        "wunstorf",
+        "txu-oclc-6534349",
+        "txu-oclc-6589697",
+        "+ 12 autres txu-oclc-*"
+      ],
+      "_comment": "UT Libraries Perry-Castaneda Map Collection : German GSGS 8830990, Italian PCL, Iceland, etc. WWII et apres-guerre.",
+      "scale": [
+        "1:25000",
+        "1:50000",
+        "1:100000"
+      ],
+      "typical_width_px": [
+        1790,
+        8934
+      ],
+      "typical_height_px": [
+        1805,
+        7030
+      ],
+      "neatline_color": "noir_fin_ou_pale",
+      "legend_location": "variable_ou_externe",
+      "frame_detection_method": "cascade_multi_threshold + fallback_density",
+      "background_hsv_mean": [
+        24,
+        30,
+        215
+      ],
+      "n_maps": 28
+    }
+  },
+  "semap": {
+    "_paper": "Generalizable Multiscale Segmentation of Heterogeneous Map Collections (arXiv 2603.05037)",
+    "_doi": "10.5281/zenodo.16164781",
+    "_license": "CC BY 4.0",
+    "external_root": "C:/Users/ochou/Documents/Claude/pfa/19048095",
+    "subdirs": {
+      "images_real": "images/images/real",
+      "images_synthetic": "images/images/synthetic",
+      "labels_real": "labels/labels/real",
+      "labels_synthetic": "labels/labels/synthetic",
+      "partitions": "partitions/partitions",
+      "model": "model/model"
+    },
+    "image_extension": ".jpg",
+    "label_extension": ".png",
+    "classes": [
+      {
+        "id": 0,
+        "name": "background",
+        "description": "Fond de la carte (papier)"
+      },
+      {
+        "id": 1,
+        "name": "contours",
+        "description": "Lignes de contour, neatline, separateurs"
+      },
+      {
+        "id": 2,
+        "name": "built",
+        "description": "Zones construites (batiments, ilots)"
+      },
+      {
+        "id": 3,
+        "name": "non_built",
+        "description": "Espaces non construits (cours, parcs)"
+      },
+      {
+        "id": 4,
+        "name": "water",
+        "description": "Hydrographie (rivieres, lacs, mer)"
+      },
+      {
+        "id": 5,
+        "name": "road_network",
+        "description": "Reseau de rues / routes"
+      }
+    ],
+    "num_classes": 6,
+    "ignore_index": 255,
+    "dataset_stats": {
+      "real_images": 1439,
+      "synthetic_images": 12122,
+      "train_size": 10703,
+      "val_size": 2712,
+      "test_size": 143,
+      "image_size_min": 768,
+      "image_size_max": 1000
+    },
+    "pretrained_model": {
+      "filename": "best_mIoU_iter_138828.pth",
+      "size_mb": 908,
+      "architecture": "Mask2Former Swin-L",
+      "config_filename": "mask2former_swin-l-in22k-384x384-pre_8xb2-160k_ade20k-640x640.py",
+      "framework": "mmsegmentation v1.2.2",
+      "_note": "Modele lourd (908 MB). Utilisable directement via mmsegmentation, ou comme supervision pour un U-Net plus leger (knowledge distillation)."
+    }
+  },
+  "soduco_palette_simple": {
+    "frame": [
+      0,
+      0,
+      0
+    ],
+    "water": [
+      0,
+      0,
+      255
+    ],
+    "blocks": [
+      255,
+      0,
+      255
+    ],
+    "non-built": [
+      0,
+      255,
+      255
+    ],
+    "road_network": [
+      255,
+      255,
+      255
+    ]
+  }
+}

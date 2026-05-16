@@ -1,6 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import MapViewer from "./components/MapViewer.jsx";
+import TrainingPanel from "./components/TrainingPanel.jsx";
+import WeightsSelector from "./components/WeightsSelector.jsx";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 const STATUS_POLL_MS = 2500;
@@ -36,7 +38,10 @@ function App() {
   const [uploading, setUploading] = useState(false);
   const [downloading, setDownloading] = useState(false);
   const [error, setError] = useState("");
-  const [form, setForm] = useState({ title: "", map_name: "", raster: null });
+  const [form, setForm] = useState({
+    title: "", map_name: "", raster: null, unet_weights: null,
+  });
+  const [showTraining, setShowTraining] = useState(false);
 
   const selected = useMemo(
     () => selectedMap || maps.find((item) => item.id === selectedId),
@@ -96,6 +101,9 @@ function App() {
     body.append("title", form.title || form.raster.name);
     body.append("map_name", form.map_name);
     body.append("raster", form.raster);
+    if (form.unet_weights) {
+      body.append("unet_weights", form.unet_weights);
+    }
 
     setUploading(true);
     try {
@@ -103,7 +111,8 @@ function App() {
       setMaps((items) => [data, ...items.filter((item) => item.id !== data.id)]);
       setSelectedId(data.id);
       setSelectedMap(data);
-      setForm({ title: "", map_name: "", raster: null });
+      setForm({ title: "", map_name: "", raster: null,
+                unet_weights: form.unet_weights });
       event.target.reset();
       setError("");
     } catch (err) {
@@ -182,12 +191,37 @@ function App() {
               onChange={(e) => setForm((state) => ({ ...state, raster: e.target.files?.[0] || null }))}
             />
           </label>
+          <div style={{ marginTop: 8 }}>
+            <WeightsSelector
+              apiBase={API_BASE}
+              value={form.unet_weights}
+              onChange={(v) => setForm((s) => ({ ...s, unet_weights: v }))}
+            />
+          </div>
           <button type="submit" disabled={uploading}>
             {uploading ? "Envoi..." : "Lancer"}
           </button>
         </form>
 
         {error && <div className="error-box">{error}</div>}
+
+        <button
+          type="button"
+          className="training-toggle"
+          onClick={() => setShowTraining((value) => !value)}
+        >
+          {showTraining ? "Masquer training" : "Training U-Net"}
+        </button>
+
+        {showTraining && (
+          <TrainingPanel
+            apiBase={API_BASE}
+            onWeightsSelected={(weightsPath) => {
+              setForm((state) => ({ ...state, unet_weights: weightsPath }));
+              setShowTraining(false);
+            }}
+          />
+        )}
 
         <div className="section-title">Cartes recentes</div>
         <div className="map-list">

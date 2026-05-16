@@ -376,13 +376,17 @@ AMS_ALGERIA_SHEETS = {
 }
 
 
-def filter_features_by_bbox(geojson_dict, bbox):
+def filter_geojson_by_bbox(geojson_dict, bbox):
     """
     Filtre les features d'un dict GeoJSON pour ne garder que celles dont
     le centroide tombe dans la bbox=(x1, y1, x2, y2) en pixels.
 
     Utilise par tasks.py apres extraction pour eliminer la legende residuelle.
     Gere Point, LineString, Polygon, Multi*.
+
+    Note : ne pas confondre avec `pipeline.vectorization.filter_features_by_bbox`
+    qui agit sur des LISTES de geometries Shapely. Cette version agit sur
+    un dict GeoJSON entier.
     """
     x1, y1, x2, y2 = bbox
     if not isinstance(geojson_dict, dict) or "features" not in geojson_dict:
@@ -450,3 +454,13 @@ def apply_transform_to_geojson(geojson_dict, bbox_px, corners):
             new_feat["geometry"] = new_geom
         out["features"].append(new_feat)
     return out
+
+
+# Alias retro-compat (DEPRECATED) -- utilise filter_geojson_by_bbox.
+# Collision de nom avec pipeline.vectorization.filter_features_by_bbox.
+filter_features_by_bbox = filter_geojson_by_bbox
+# Alias retro-compat (DEPRECATED). Utilise filter_geojson_by_bbox.
+# Collision de nom avec pipeline.vectorization.filter_features_by_bbox
+# qui agit sur des listes Shapely. Cet alias permet aux anciens scripts
+# de continuer a fonctionner sans modification immediate.
+filter_features_by_bbox = filter_geojson_by_bbox

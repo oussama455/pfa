@@ -44,6 +44,12 @@ class MapUpload(models.Model):
     confidence_score = models.FloatField(blank=True, null=True)
     qa_passed     = models.BooleanField(default=False)
     retry_count   = models.PositiveSmallIntegerField(default=0)
+    # Chemin du fichier .pth a utiliser pour la segmentation U-Net.
+    # None = pas d'U-Net (segmentation couleur seulement).
+    unet_weights  = models.CharField(
+        'Poids U-Net', max_length=500, blank=True, null=True,
+        help_text="Chemin vers le .pth a utiliser. Vide = pas d'U-Net."
+    )
 
     # ── Geo ───────────────────────────────────────────────────────────────────
     georef_crs    = models.CharField(max_length=50, blank=True, null=True)
@@ -203,3 +209,92 @@ class TrainingPatch(models.Model):
     def __str__(self):
         return (f'Patch [{self.tile_row},{self.tile_col}] '
                 f'map={self.map_upload_id} layer={self.layer_name}')
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TrainingJob -- represente un entrainement U-Net lance depuis la webapp
+# ─────────────────────────────────────────────────────────────────────────────
+class TrainingJob(models.Model):
+    """
+    Entrainement U-Net lance par scripts/train.py via la webapp.
+
+    Le thread de fond appelle `python scripts/train.py --dataset <X>` et
+    capture stdout dans log_path. Quand le run reussit, output_weights_path
+    pointe vers external/weight/<dataset>_unet_best.pth.
+    """
+
+    DATASET_CHOICES = [
+        ('soduco', 'SODUCO Benchmark (5 classes)'),
+        ('semap',  'SEMAP Petitpierre (6 classes)'),
+    ]
+    STATUS_CHOICES = [
+        ('queued',  'En file d\'attente'),
+        ('running', 'En cours'),
+        ('done',    'Terminé'),
+        ('failed',  'Échec'),
+        ('aborted', 'Interrompu'),
+    ]
+
+    dataset      = models.CharField(max_length=20, choices=DATASET_CHOICES,
+                                     default='semap')
+    epochs       = models.PositiveSmallIntegerField(default=20)
+    batch_size   = models.PositiveSmallIntegerField(default=8)
+    target_size  = models.PositiveSmallIntegerField(default=512)
+    learning_rate = models.FloatField(default=1e-4)
+    encoder      = models.CharField(max_length=32, default='resnet34')
+    no_synthetic = models.BooleanField(default=False,
+                    help_text="SEMAP only : exclut les 12 122 images synthétiques.")
+    no_augment   = models.BooleanField(default=False)
+
+    status       = models.CharField(max_length=20, choices=STATUS_CHOICES,
+                                     default='queued')
+    pid          = models.IntegerField(blank=True, null=True)
+    log_path     = models.CharField(max_length=500, blank=True, null=True)
+    output_weights_path = models.CharField(max_length=500, blank=True, null=True)
+    best_miou    = models.FloatField(blank=True, null=True)
+    error_message = models.TextField(blank=True, null=True)
+
+    created_at   = models.DateTimeField(auto_now_add=True)
+    started_at   = models.DateTimeField(blank=True, null=True)
+    finished_at  = models.DateTimeField(blank=True, null=True)
+
+    class Meta:
+        ordering = ['-created_at']
+        verbose_name = 'Training Job'
+        verbose_name_plural = 'Training Jobs'
+
+    def __str__(self):
+        return f'TrainingJob#{self.pk} [{self.dataset} {self.status}]'
+
+    def mark_running(self, pid=None):
+        self.status = 'running'
+        self.pid = pid
+        self.started_at = timezone.now()
+        self.save(update_fields=['status', 'pid', 'started_at'])
+
+    def mark_done(self, weights_path: str | None = None, best_miou: float | None = None):
+        self.status = 'done'
+        self.finished_at = timezone.now()
+        if weights_path:
+            self.output_weights_path = str(weights_path)
+        if best_miou is not None:
+            self.best_miou = best_miou
+        self.save()
+
+    def mark_failed(self, message: str):
+        self.status = 'failed'
+        self.finished_at = timezone.now()
+        self.error_message = message[:5000]
+        self.save()
+
+    @property
+    def output_weights_url(self) -> str | None:
+        """URL Django pour telecharger le .pth s'il existe."""
+        if not self.output_weights_path:
+            return None
+        p = Path(self.output_weights_path)
+        if not p.exists():
+            return None
+        # Doit etre servi via une vue dediee (cf. api_training.py)
+        return reverse('vectorizer:api-training-download',
+                       kwargs={'pk': self.pk})

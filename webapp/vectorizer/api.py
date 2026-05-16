@@ -41,6 +41,7 @@ class MapUploadSerializer(serializers.ModelSerializer):
         model  = MapUpload
         fields = [
             "id", "title", "map_name", "map_type", "raster_url",
+            "unet_weights",
             "status", "status_label", "error_message",
             "confidence_score", "qa_passed", "retry_count",
             "georef_crs", "raster_bounds",
@@ -92,10 +93,11 @@ class MapListCreateView(APIView):
         return Response(serializer.data)
 
     def post(self, request: Request) -> Response:
-        # Expect: title (str), raster (file), map_name (str, optional)
-        title    = request.data.get("title", "Untitled Map")
-        raster   = request.FILES.get("raster")
-        map_name = request.data.get("map_name", "")
+        # Expect: title (str), raster (file), map_name/unet_weights (optional)
+        title        = request.data.get("title", "Untitled Map")
+        raster       = request.FILES.get("raster")
+        map_name     = request.data.get("map_name", "")
+        unet_weights = request.data.get("unet_weights") or None
 
         if not raster:
             return Response(
@@ -107,6 +109,7 @@ class MapListCreateView(APIView):
             title=title,
             raster=raster,
             map_name=map_name or None,
+            unet_weights=unet_weights,
         )
 
         # Start async pipeline (thread or Celery, depending on tasks.py)

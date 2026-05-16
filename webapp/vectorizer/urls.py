@@ -16,6 +16,13 @@ from .api_v2 import (
     CalibrationHistoryView,
     CalibrationResetView,
 )
+from .api_training import (
+    WeightsListView,
+    TrainingJobListCreateView,
+    TrainingJobDetailView,
+    TrainingJobLogView,
+    TrainingJobDownloadView,
+)
 
 app_name = 'vectorizer'
 
@@ -37,4 +44,11 @@ urlpatterns = [
     path('api/calibration/history/',              CalibrationHistoryView.as_view(), name='api-calib-history'),
     path('api/calibration/<str:series>/',         CalibrationStatusView.as_view(),  name='api-calibration'),
     path('api/calibration/<str:series>/reset/',   CalibrationResetView.as_view(),   name='api-calib-reset'),
+
+    # ── REST API — Training U-Net + selection des poids ───────────────────
+    path('api/weights/',                     WeightsListView.as_view(),              name='api-weights'),
+    path('api/training/',                    TrainingJobListCreateView.as_view(),    name='api-training'),
+    path('api/training/<int:pk>/',           TrainingJobDetailView.as_view(),        name='api-training-detail'),
+    path('api/training/<int:pk>/log/',       TrainingJobLogView.as_view(),           name='api-training-log'),
+    path('api/training/<int:pk>/download/',  TrainingJobDownloadView.as_view(),      name='api-training-download'),
 ]

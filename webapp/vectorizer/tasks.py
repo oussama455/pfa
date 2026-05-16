@@ -42,14 +42,18 @@ def _run_pipeline_thread(upload_id: int) -> None:
         return
 
     try:
-        # Appel direct du pipeline principal avec les mêmes arguments que la commande CLI
+        # Resout les poids U-Net : choix explicite via upload.unet_weights, sinon
+        # auto-detection dans external/weight/.
+        weights = _get_weights_path(upload=upload)
+        use_semantic = weights is not None
+
         try:
             from pipeline.pipeline import run_pipeline
             result = run_pipeline(
                 str(upload.raster_path),
                 str(upload.output_dir),
-                with_semantic=True,
-                unet_weights=r"C:\Users\ochou\Documents\Claude\pfa\pfa.worktrees\dev-ses-pfa\external\weight\semap_unet_best.pth",
+                with_semantic=use_semantic,
+                unet_weights=weights,
                 device=None,  # "auto" en CLI correspond à None ici
                 verbose=True
             )
@@ -116,25 +120,38 @@ def _run_classic_pipeline(upload) -> None:
     upload.mark_done(georef_crs="EPSG:4326" if upload.map_name else None)
 
 
-def _get_weights_path():
+def _get_weights_path(upload=None):
+    """
+    Resolution du chemin .pth a utiliser pour l'inference U-Net.
+
+    Ordre de priorite :
+        1. upload.unet_weights si le MapUpload en a un explicite (UI/API).
+        2. external/weight/semap_unet_best.pth (default si entrainement SEMAP fait).
+        3. external/weight/soduco_unet_best.pth (default si entrainement SODUCO fait).
+        4. None -> pipeline classique sans U-Net.
+    """
     import os
     from pathlib import Path
-    
-    # المسار المطلق المباشر (الأكثر أماناً في ويندوز)
-    absolute_path = r"C:\Users\ochou\Documents\Claude\pfa\pfa.worktrees\dev-ses-pfa\external\weight\semap_unet_best.pth"
-    
-    if os.path.exists(absolute_path):
-        return absolute_path
-    
-    # حل احتياطي ديناميكي باستخدام PROJECT_ROOT من ملفك _path_setup
+
+    # 1. Choix explicite par l'utilisateur via l'API
+    if upload is not None and getattr(upload, "unet_weights", None):
+        chosen = Path(upload.unet_weights)
+        if chosen.is_file():
+            return str(chosen)
+        logger.warning("[tasks] unet_weights '%s' introuvable, fallback automatique",
+                       upload.unet_weights)
+
+    # 2. + 3. Cherche les checkpoints standards
     try:
         from . import _path_setup
-        dynamic_path = Path(_path_setup.PROJECT_ROOT) / "external" / "weight" / "semap_unet_best.pth"
-        if dynamic_path.is_file():
-            return str(dynamic_path)
-    except:
-        pass
-        
+        weight_dir = Path(_path_setup.PROJECT_ROOT) / "external" / "weight"
+    except (ImportError, AttributeError):
+        weight_dir = Path(__file__).resolve().parents[2] / "external" / "weight"
+
+    for name in ("semap_unet_best.pth", "soduco_unet_best.pth"):
+        p = weight_dir / name
+        if p.is_file():
+            return str(p)
     return None
 
 def _extract_bounds(agent_result):

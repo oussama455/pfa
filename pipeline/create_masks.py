@@ -21,12 +21,21 @@ from skimage import measure
 
 logger = logging.getLogger(__name__)
 
-# ── Charger la config calibrée ────────────────────────────────────────────────
+# ── Charger la config calibree ────────────────────────────────────────────────
+# Config unifiee v2 : data/config.json -> blocs hsv_ranges + mask_parameters.
+# Fallback retro-compat : data/dataset_config.json.
 _project_root = Path(__file__).resolve().parents[1]
-_cfg_path = _project_root / "data" / "dataset_config.json"
-if not _cfg_path.exists():
-    _cfg_path = Path(__file__).parent / "dataset_config.json"
-_CFG = json.loads(_cfg_path.read_text()) if _cfg_path.exists() else {}
+_unified = _project_root / "data" / "config.json"
+_legacy  = _project_root / "data" / "dataset_config.json"
+_local   = Path(__file__).parent / "dataset_config.json"
+if _unified.exists():
+    _CFG = json.loads(_unified.read_text())
+elif _legacy.exists():
+    _CFG = json.loads(_legacy.read_text())
+elif _local.exists():
+    _CFG = json.loads(_local.read_text())
+else:
+    _CFG = {}
 
 def _hsv(key):
     return _CFG.get("hsv_ranges", {}).get(key, {})

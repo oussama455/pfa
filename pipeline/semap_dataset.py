@@ -42,11 +42,30 @@ def _project_root() -> Path:
 
 
 def _load_config(config_path: Optional[str | Path] = None) -> dict:
-    """Charge data/semap_config.json par defaut."""
-    if config_path is None:
-        config_path = _project_root() / "data" / "semap_config.json"
-    with open(config_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+    """
+    Charge le bloc SEMAP de data/config.json (config unifiee v2).
+
+    Fallback : si data/config.json absent, retombe sur l'ancien
+    data/semap_config.json pour compatibilite retro.
+    """
+    if config_path is not None:
+        with open(config_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    root = _project_root()
+    unified = root / "data" / "config.json"
+    legacy  = root / "data" / "semap_config.json"
+    if unified.exists():
+        with open(unified, "r", encoding="utf-8") as f:
+            all_cfg = json.load(f)
+        if "semap" not in all_cfg:
+            raise KeyError("data/config.json sans bloc 'semap'.")
+        return all_cfg["semap"]
+    if legacy.exists():
+        with open(legacy, "r", encoding="utf-8") as f:
+            return json.load(f)
+    raise FileNotFoundError(
+        "Ni data/config.json ni data/semap_config.json trouve."
+    )
 
 
 def resolve_external_root(config: dict) -> Path:
@@ -55,7 +74,7 @@ def resolve_external_root(config: dict) -> Path:
     if not p.exists():
         raise FileNotFoundError(
             f"SEMAP external_root introuvable : {p}\n"
-            f"Edite data/semap_config.json -> 'external_root' avec le bon chemin."
+            f"Edite data/config.json -> 'semap.external_root' avec le bon chemin."
         )
     return p
 

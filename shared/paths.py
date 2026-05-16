@@ -1,8 +1,9 @@
 """
-shared.paths — alias retro-compat vers pipeline.paths.
+DEPRECATED -- utilise `from pipeline.paths import Paths` a la place.
 
-Le module canonique est `pipeline.paths`. Ce shim permet a tout code
-qui fait `from shared.paths import Paths` de continuer a fonctionner.
+Ce shim reste pour compatibilite avec d'anciens scripts qui font
+`from shared.paths import Paths`. Il sera supprime au prochain
+nettoyage du repo (`git rm -r shared/`).
 """
 from pipeline.paths import *  # noqa: F401,F403
 from pipeline.paths import Paths, configure_gdal_windows  # noqa: F401
