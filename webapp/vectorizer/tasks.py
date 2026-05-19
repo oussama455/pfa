@@ -3,6 +3,12 @@ webapp/vectorizer/tasks.py — Pipeline execution (V2 with LangGraph agent).
 Backwards-compatible with V1 thread model.
 """
 from __future__ import annotations
+
+# ── Sécurités CUDA — placées avant tout import torch (voir pipeline.py) ─────
+import os
+os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
+
 import logging
 import sys
 import threading
@@ -47,16 +53,24 @@ def _run_pipeline_thread(upload_id: int) -> None:
         weights = _get_weights_path(upload=upload)
         use_semantic = weights is not None
 
+        # Le flag has_georeference est positionné par l'API au moment du POST.
+        # Par défaut False → pipeline en coords pixel image.
+        georeference = bool(getattr(upload, "has_georeference", False))
+
         try:
             from pipeline.pipeline import run_pipeline
             result = run_pipeline(
                 str(upload.raster_path),
                 str(upload.output_dir),
+                georeference=georeference,
                 with_semantic=use_semantic,
                 unet_weights=weights,
                 device=None,  # "auto" en CLI correspond à None ici
                 verbose=True
             )
+            # Le pipeline peut avoir dégradé en pixel si le module SIG manque.
+            effective_georef = bool(getattr(result, "has_georeference",
+                                              getattr(result, "georeferenced", False)))
             # Marquer comme terminé (adapter selon la sortie de run_pipeline)
             upload.mark_done(
                 map_type=getattr(result, "map_type", None),
@@ -65,8 +79,10 @@ def _run_pipeline_thread(upload_id: int) -> None:
                 retry_count=getattr(result, "retry_count", 0),
                 georef_crs=getattr(result, "georef_crs", None),
                 raster_bounds=None,
+                has_georeference=effective_georef,
             )
-            logger.info("[tasks] Pipeline done map_id=%d", upload_id)
+            logger.info("[tasks] Pipeline done map_id=%d georef=%s",
+                        upload_id, effective_georef)
         except ImportError:
             logger.warning("[tasks] pipeline import failed, fallback to classic pipeline map_id=%d", upload_id)
             _run_classic_pipeline(upload)
@@ -78,6 +94,10 @@ def _run_pipeline_thread(upload_id: int) -> None:
 
 
 def _run_classic_pipeline(upload) -> None:
+    """
+    Fallback pipeline minimal (sans agent LangGraph).
+    Respecte upload.has_georeference : si False, écrit du GeoJSON pixel direct.
+    """
     import sys, json, cv2
     from django.conf import settings
     project_root = Path(settings.BASE_DIR).parent
@@ -86,6 +106,8 @@ def _run_classic_pipeline(upload) -> None:
 
     from pipeline.preprocessing import detect_map_frame
     from pipeline.color_segmentation import extract_all_color_layers
+
+    georeference = bool(getattr(upload, "has_georeference", False))
 
     img = cv2.imread(str(upload.raster_path))
     if img is None:
@@ -99,38 +121,59 @@ def _run_classic_pipeline(upload) -> None:
     img_crop = img_small[y1:y2, x1:x2]
     layers = extract_all_color_layers(cv2.cvtColor(img_crop, cv2.COLOR_BGR2HSV))
 
+    effective_georef = False
     try:
         from pipeline.vectorization import masks_to_geojson
-        from pipeline.georeferencing import (
-            AMS_ALGERIA_SHEETS, apply_transform_to_geojson, filter_features_by_bbox
-        )
-        geojsons = masks_to_geojson(layers)
-        corners = AMS_ALGERIA_SHEETS.get(upload.map_name) if upload.map_name else None
+        # Toujours produire d'abord en pixels — c'est l'invariant.
+        geojsons = masks_to_geojson(layers, georeference=False)
+
+        # Géoréférencement optionnel
+        if georeference:
+            try:
+                from pipeline.georeferencing import (
+                    AMS_ALGERIA_SHEETS, apply_transform_to_geojson,
+                    filter_features_by_bbox,
+                )
+                corners = (AMS_ALGERIA_SHEETS.get(upload.map_name)
+                           if upload.map_name else None)
+                if corners:
+                    for name, gj in geojsons.items():
+                        gj = filter_features_by_bbox(gj, bbox)
+                        gj = apply_transform_to_geojson(gj, bbox, corners)
+                        gj["crs"] = {"type": "name",
+                                     "properties": {"name": "urn:ogc:def:crs:OGC:1.3:CRS84"}}
+                        geojsons[name] = gj
+                    effective_georef = True
+                else:
+                    logger.info("[tasks] map_name '%s' absent du registre AMS — pixel kept",
+                                upload.map_name)
+            except (ImportError, OSError) as e:
+                logger.warning("[tasks] georeferencing unavailable, staying in pixel mode: %s", e)
+
         for name, gj in geojsons.items():
-            if corners:
-                gj = filter_features_by_bbox(gj, bbox)
-                gj = apply_transform_to_geojson(gj, bbox, corners)
-                gj["crs"] = {"type":"name","properties":{"name":"urn:ogc:def:crs:OGC:1.3:CRS84"}}
             out = upload.output_dir / f"{name}.geojson"
             with open(out, "w", encoding="utf-8") as f:
                 json.dump(gj, f, indent=2)
     except ImportError as e:
         logger.warning("[tasks] vectorization import failed: %s", e)
 
-    upload.mark_done(georef_crs="EPSG:4326" if upload.map_name else None)
+    upload.mark_done(
+        georef_crs="EPSG:4326" if effective_georef else None,
+        has_georeference=effective_georef,
+    )
 
 
 def _get_weights_path(upload=None):
     """
     Resolution du chemin .pth a utiliser pour l'inference U-Net.
 
-    Ordre de priorite :
-        1. upload.unet_weights si le MapUpload en a un explicite (UI/API).
-        2. external/weight/semap_unet_best.pth (default si entrainement SEMAP fait).
-        3. external/weight/soduco_unet_best.pth (default si entrainement SODUCO fait).
-        4. None -> pipeline classique sans U-Net.
+    Règle simplifiée pour la démo PFA :
+        1. Si l'utilisateur choisit un fichier .pth dans l'interface, on l'utilise.
+        2. Sinon, None -> segmentation HSV seule.
+
+    Important : on ne choisit plus automatiquement un .pth présent sur disque.
+    Cela évite de lancer U-Net par surprise sur RTX 2050 pendant une démo.
     """
-    import os
     from pathlib import Path
 
     # 1. Choix explicite par l'utilisateur via l'API
@@ -138,20 +181,8 @@ def _get_weights_path(upload=None):
         chosen = Path(upload.unet_weights)
         if chosen.is_file():
             return str(chosen)
-        logger.warning("[tasks] unet_weights '%s' introuvable, fallback automatique",
+        logger.warning("[tasks] unet_weights '%s' introuvable, passage en HSV seul",
                        upload.unet_weights)
-
-    # 2. + 3. Cherche les checkpoints standards
-    try:
-        from . import _path_setup
-        weight_dir = Path(_path_setup.PROJECT_ROOT) / "external" / "weight"
-    except (ImportError, AttributeError):
-        weight_dir = Path(__file__).resolve().parents[2] / "external" / "weight"
-
-    for name in ("semap_unet_best.pth", "soduco_unet_best.pth"):
-        p = weight_dir / name
-        if p.is_file():
-            return str(p)
     return None
 
 def _extract_bounds(agent_result):

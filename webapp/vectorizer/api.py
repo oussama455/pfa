@@ -28,23 +28,38 @@ from .models import MapUpload, Correction
 from .tasks import enqueue_pipeline
 
 
+def _parse_bool(value, *, default: bool = False) -> bool:
+    """
+    Parse les booléens venant d'un payload multipart (str) ou JSON (bool).
+    Accepte : True/False, "true"/"false", "1"/"0", "yes"/"no", "on"/"off".
+    """
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Serializers
 # ─────────────────────────────────────────────────────────────────────────────
 
 class MapUploadSerializer(serializers.ModelSerializer):
-    output_layers = serializers.SerializerMethodField()
-    raster_url    = serializers.SerializerMethodField()
-    status_label  = serializers.SerializerMethodField()
+    output_layers      = serializers.SerializerMethodField()
+    raster_url         = serializers.SerializerMethodField()
+    original_image_url = serializers.SerializerMethodField()
+    raster_size        = serializers.SerializerMethodField()
+    status_label       = serializers.SerializerMethodField()
 
     class Meta:
         model  = MapUpload
         fields = [
-            "id", "title", "map_name", "map_type", "raster_url",
+            "id", "title", "map_name", "map_type",
+            "raster_url", "original_image_url", "raster_size",
             "unet_weights",
             "status", "status_label", "error_message",
             "confidence_score", "qa_passed", "retry_count",
-            "georef_crs", "raster_bounds",
+            "has_georeference", "georef_crs", "raster_bounds",
             "created_at", "updated_at", "finished_at", "output_layers",
         ]
         read_only_fields = ["id", "status", "created_at", "updated_at"]
@@ -57,6 +72,29 @@ class MapUploadSerializer(serializers.ModelSerializer):
         if obj.raster and request:
             return request.build_absolute_uri(obj.raster.url)
         return obj.raster.url if obj.raster else None
+
+    def get_original_image_url(self, obj):
+        """
+        Alias dédié au frontend : indique l'URL de l'image d'origine à
+        charger comme ImageOverlay sous Leaflet en mode pixel (CRS.Simple).
+        Identique à raster_url en pratique.
+        """
+        return self.get_raster_url(obj)
+
+    def get_raster_size(self, obj):
+        """
+        Retourne (width, height) en pixels du raster original. Le frontend
+        en a besoin pour fixer les bounds de L.CRS.Simple en mode pixel.
+        Renvoie None si l'image est introuvable ou Pillow indisponible.
+        """
+        if not obj.raster:
+            return None
+        try:
+            from PIL import Image
+            with Image.open(obj.raster.path) as im:
+                return {"width": im.width, "height": im.height}
+        except Exception:  # noqa: BLE001
+            return None
 
     def get_status_label(self, obj):
         return obj.get_status_display()
@@ -94,10 +132,12 @@ class MapListCreateView(APIView):
 
     def post(self, request: Request) -> Response:
         # Expect: title (str), raster (file), map_name/unet_weights (optional)
+        # Also accepts: georeference (bool, default False).
         title        = request.data.get("title", "Untitled Map")
         raster       = request.FILES.get("raster")
         map_name     = request.data.get("map_name", "")
         unet_weights = request.data.get("unet_weights") or None
+        georeference = _parse_bool(request.data.get("georeference"), default=False)
 
         if not raster:
             return Response(
@@ -110,6 +150,7 @@ class MapListCreateView(APIView):
             raster=raster,
             map_name=map_name or None,
             unet_weights=unet_weights,
+            has_georeference=georeference,
         )
 
         # Start async pipeline (thread or Celery, depending on tasks.py)
@@ -138,11 +179,12 @@ class MapStatusView(APIView):
     def get(self, request: Request, pk: int) -> Response:
         upload = get_object_or_404(MapUpload, pk=pk)
         return Response({
-            "id":           upload.pk,
-            "status":       upload.status,
-            "status_label": upload.get_status_display(),
-            "error":        upload.error_message,
-            "layers":       upload.output_layers,
+            "id":               upload.pk,
+            "status":           upload.status,
+            "status_label":     upload.get_status_display(),
+            "error":            upload.error_message,
+            "has_georeference": upload.has_georeference,
+            "layers":           upload.output_layers,
         })
 
 

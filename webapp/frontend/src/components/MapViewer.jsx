@@ -48,6 +48,20 @@ import CalibrationPanel from "./CalibrationPanel.jsx";
 // Constants & Configuration
 // ─────────────────────────────────────────────────────────────────────────────
 
+/**
+ * CRS personnalisé pour le mode pixel.
+ *
+ * L.CRS.Simple par défaut inverse l'axe Y (transformation (1,0,-1,0)),
+ * ce qui mettrait notre image à l'envers. Ici on garde Y croissant vers
+ * le bas, comme dans le GeoJSON sortie pipeline (origine top-left).
+ *
+ * Avec ce CRS, une feature GeoJSON [x, y] s'aligne pixel-à-pixel avec
+ * l'image overlay dont les bounds sont [[0,0], [H, W]].
+ */
+const PIXEL_CRS = L.extend({}, L.CRS.Simple, {
+  transformation: new L.Transformation(1, 0, 1, 0),
+});
+
 /** Visual style per semantic layer — military map conventions. */
 const LAYER_STYLES = {
   buildings:  { color: "#2c3e50", weight: 1.5, fillColor: "#7f8c8d", fillOpacity: 0.55 },
@@ -352,6 +366,8 @@ export default function MapViewer({
   mapId,
   rasterUrl,
   rasterBounds,
+  rasterSize = null,           // { width, height } en pixels — mode pixel
+  hasGeoreference = false,     // false (défaut) = mode pixel, true = mode SIG
   apiBaseUrl = "/api",
   geojsonLayers: geojsonLayersProp = null,
   mapSeries = "ams_tunisia",
@@ -369,12 +385,34 @@ export default function MapViewer({
   const { queue, addDelete, addEdit, saveAll, saving, savedCount, error: saveError }
     = useCorrections(mapId, apiBaseUrl);
 
-  // Map center: derived from rasterBounds midpoint
+  // ── Mode pixel vs mode SIG ─────────────────────────────────────────────────
+  // En mode pixel (défaut), Leaflet utilise PIXEL_CRS (Y descendant) :
+  // bounds = [[0,0], [H, W]] et les coords GeoJSON [x, y] s'alignent
+  // pixel-à-pixel avec l'image.
+  const pixelBounds = useMemo(() => {
+    if (hasGeoreference) return null;
+    const w = rasterSize?.width  ?? 1000;
+    const h = rasterSize?.height ?? 1000;
+    return [[0, 0], [h, w]];   // [[lat_sw=0, lng_sw=0], [lat_ne=H, lng_ne=W]]
+  }, [hasGeoreference, rasterSize]);
+
+  // Map center: derived from bounds midpoint (pixel ou géo selon le mode)
   const mapCenter = useMemo(() => {
+    if (!hasGeoreference) {
+      if (!pixelBounds) return [0, 0];
+      const [[lat0, lng0], [lat1, lng1]] = pixelBounds;
+      return [(lat0 + lat1) / 2, (lng0 + lng1) / 2];
+    }
     if (!rasterBounds) return [36.85, 10.25]; // Tunis default
     const [[lat0, lon0], [lat1, lon1]] = rasterBounds;
     return [(lat0 + lat1) / 2, (lon0 + lon1) / 2];
-  }, [rasterBounds]);
+  }, [hasGeoreference, rasterBounds, pixelBounds]);
+
+  // Bounds effectifs et CRS Leaflet à utiliser
+  const effectiveBounds = hasGeoreference ? rasterBounds : pixelBounds;
+  const effectiveCRS    = hasGeoreference ? L.CRS.EPSG3857 : PIXEL_CRS;
+  // Niveau de zoom initial : -1 pour bien afficher toute l'image en mode pixel.
+  const initialZoom     = hasGeoreference ? 12 : 0;
 
   // ── Fetch GeoJSON layers from API ──────────────────────────────────────────
   useEffect(() => {
@@ -510,23 +548,32 @@ export default function MapViewer({
       {/* ── Map ────────────────────────────────────────────────────────── */}
       <MapContainer
         center={mapCenter}
-        zoom={12}
-        style={{ width: "100%", height: "100%", minHeight: 520 }}
+        zoom={initialZoom}
+        minZoom={hasGeoreference ? 3 : -4}
+        maxZoom={hasGeoreference ? 18 : 4}
+        crs={effectiveCRS}
+        style={{ width: "100%", height: "100%", minHeight: 520,
+                  background: hasGeoreference ? undefined : "#1a1f2e" }}
         zoomControl={true}
       >
-        {/* OSM base tiles (background reference) */}
-        <TileLayer
-          url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
-          attribution='&copy; <a href="https://openstreetmap.org">OSM</a>'
-          opacity={0.3}   // faint — the raster map is the main visual
-        />
+        {/* Tuiles OSM uniquement en mode SIG — inutiles voire trompeuses
+            en mode pixel où on n'a pas de référentiel géographique. */}
+        {hasGeoreference && (
+          <TileLayer
+            url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
+            attribution='&copy; <a href="https://openstreetmap.org">OSM</a>'
+            opacity={0.3}
+          />
+        )}
 
-        {/* Historical AMS raster overlay */}
-        {rasterUrl && rasterBounds && (
+        {/* Raster historique : en mode pixel on étire l'image aux dimensions
+            natives (bounds = [[0,0], [H, W]]). En mode SIG on utilise les
+            bounds géographiques. */}
+        {rasterUrl && effectiveBounds && (
           <ImageOverlay
             url={rasterUrl}
-            bounds={rasterBounds}
-            opacity={0.85}
+            bounds={effectiveBounds}
+            opacity={hasGeoreference ? 0.85 : 1.0}
             zIndex={10}
           />
         )}

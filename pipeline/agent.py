@@ -102,6 +102,9 @@ class AgentState(TypedDict, total=False):
     map_name: Optional[str]
     weights_path: Optional[str]
     device: Optional[str]
+    # Mode SIG : False (défaut) = sortie en pixels image,
+    #            True            = applique georeferencing si dispo.
+    georeference: bool
 
     # ── Perception ───────────────────────────────────────────────────────────
     map_type: Literal["monochrome", "stratégique", "unknown"]
@@ -701,11 +704,23 @@ def node_georef(state: AgentState) -> Dict:
     """
     GEOREF node — attaches WGS84 coordinates to the raw GeoJSON features.
 
+    SHORT-CIRCUIT : si state["georeference"] est False (mode pixel par
+    défaut), on ne touche pas aux geojsons et on log un passthrough.
+    L'export récupère alors les coordonnées pixel telles quelles.
+
     Uses the AMS_ALGERIA_SHEETS / TUNIS registry from georeferencing.py.
     If map_name is not in the registry, uses the map's printed corner
     coordinates (stored in map_metadata.crs_hint) as a fallback.
     """
     log_entry = {"node": "georef", "ts": time.time()}
+
+    # ── Mode pixel : on saute purement et simplement ────────────────────────
+    if not state.get("georeference", False):
+        log_entry["georef_status"] = "skipped (georeference=False — pixel mode)"
+        return {
+            "georef_crs": None,
+            "agent_log": state.get("agent_log", []) + [log_entry],
+        }
 
     map_name = state.get("map_name") or state.get("map_metadata", {}).get("map_name")
     bbox = state.get("crop_bbox")
@@ -869,6 +884,7 @@ def run_agent(
     map_name: Optional[str] = None,
     weights_path: Optional[str] = None,
     device: Optional[str] = None,
+    georeference: bool = False,
 ) -> AgentState:
     """
     High-level entry point: run the full agent on a raster map.
@@ -879,6 +895,10 @@ def run_agent(
         map_name:      Sheet name for auto GCP lookup (e.g. "tunis", "ain_bessem").
         weights_path:  Path to U-Net .pth weights (optional; HSV used as fallback).
         device:        "cuda" / "cpu" / None (auto-detect).
+        georeference:  False (default) = pixel-space output. True = enable the
+                       georef node, which applies the AMS sheet-corners transform
+                       to produce WGS84 coordinates. Requires georeferencing.py
+                       and rasterio.
 
     Returns:
         Final AgentState dict containing output_geojsons, agent_log, etc.
@@ -891,11 +911,13 @@ def run_agent(
         "map_name":      map_name,
         "weights_path":  weights_path,
         "device":        device,
+        "georeference":  georeference,
         "retry_count":   0,
         "agent_log":     [],
     }
 
-    logger.info("[agent] Starting — raster=%s  map_name=%s", raster_path, map_name)
+    logger.info("[agent] Starting — raster=%s  map_name=%s  georef=%s",
+                raster_path, map_name, georeference)
     result = agent.invoke(initial_state)
     logger.info("[agent] Done — outputs=%s  qa_passed=%s  score=%.3f",
                 list(result.get("output_geojsons", {}).keys()),

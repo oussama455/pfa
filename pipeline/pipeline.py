@@ -19,7 +19,23 @@ Usage CLI :
 """
 from __future__ import annotations
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Sécurités CUDA & mémoire (DOIVENT être positionnées AVANT tout import torch)
+# CUDA_LAUNCH_BLOCKING=1  : force la synchronisation pour que la stack trace
+#                          pointe vraiment l'opération qui plante.
+# PYTORCH_CUDA_ALLOC_CONF=max_split_size_mb:128 : limite la fragmentation
+#                          du pool de mémoire CUDA — utile sur RTX 2050
+#                          (4 Go VRAM) où les segments fragmentés finissent
+#                          par lever OutOfMemoryError même quand il reste
+#                          de la place "en théorie".
+# Ces variables sont sans effet si CUDA n'est pas utilisé.
+# ─────────────────────────────────────────────────────────────────────────────
+import os
+os.environ.setdefault("CUDA_LAUNCH_BLOCKING", "1")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128")
+
 import argparse
+import gc
 import json
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -31,7 +47,16 @@ from skimage.morphology import skeletonize
 from . import preprocessing as prep
 from . import color_segmentation as colseg
 from . import vectorization as vec
-from . import georeferencing as geo
+
+# Le module georeferencing est importé paresseusement : sans GDAL il
+# peut être indisponible, et en mode pixel-only on n'en a pas besoin.
+try:
+    from . import georeferencing as geo
+    _GEOREFERENCING_AVAILABLE = True
+except (ImportError, OSError) as _geo_exc:  # pragma: no cover
+    geo = None  # type: ignore[assignment]
+    _GEOREFERENCING_AVAILABLE = False
+    _GEOREFERENCING_IMPORT_ERROR = _geo_exc
 
 
 # ── HSV calibrées sur 8 cartes réelles (Tunisie + Algérie, 1:50 000) ─────────
@@ -76,6 +101,7 @@ class PipelineResult:
     layers:        Dict[str, str]
     counts:        Dict[str, int]
     georeferenced: bool
+    has_georeference: bool = False
     legend_removed: bool = False
 
     def to_json(self) -> str:
@@ -102,7 +128,8 @@ def _load_semap_config(project_root: Path) -> dict | None:
 def run_pipeline(input_path: str | Path,
                  output_dir: str | Path,
                  *,
-                 gcps: Optional[List[geo.GCP]] = None,
+                 georeference: bool = False,
+                 gcps: Optional[List] = None,
                  crs: Optional[str] = "EPSG:4326",
                  with_semantic: bool = False,
                  unet_weights: Optional[str] = None,
@@ -118,6 +145,12 @@ def run_pipeline(input_path: str | Path,
     Pipeline complet : raster → GeoJSON par couche.
 
     Arguments :
+        georeference       : MODE SIG. Défaut **False** — coordonnées en pixels
+                             image, prêtes pour Leaflet.CRS.Simple + ImageOverlay.
+                             True = applique la transformation affine (via GCPs
+                             ou registre AMS) pour produire du WGS84/EPSG:4326.
+        gcps               : Ground Control Points pour le géoréférencement.
+                             Ignorés si georeference=False.
         remove_legend      : supprime la légende interne (Stage 2).
                              Défaut True — obligatoire sur cartes AMS/GSGS.
         use_calibrated_hsv : utilise les plages HSV calibrées sur 8 cartes réelles.
@@ -128,6 +161,14 @@ def run_pipeline(input_path: str | Path,
     input_path = Path(input_path)
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Garde-fou : si l'appelant demande le SIG mais que le module est KO,
+    # on log un avertissement et on retombe en mode pixel.
+    if georeference and not _GEOREFERENCING_AVAILABLE:
+        if verbose:
+            print("[!] georeference=True demandé mais georeferencing.py "
+                  "indisponible — bascule en mode pixel.")
+        georeference = False
 
     # 1) Prétraitement + recadrage (Stage 1 neatline + Stage 2 légende)
     if verbose:
@@ -200,18 +241,22 @@ def run_pipeline(input_path: str | Path,
     elif verbose:
         print("[3/5] Segmentation U-Net : sautée (with_semantic=False)")
 
-    # 4) Géoréférencement
+    # 4) Géoréférencement — conditionnel
     transform = None
-    if gcps:
+    if georeference and gcps and _GEOREFERENCING_AVAILABLE:
         if verbose:
             print(f"[4/5] Géoréférencement ({len(gcps)} GCPs)")
         transform = geo.compute_transform(gcps)
     elif verbose:
-        print("[4/5] Géoréférencement : sautée (pas de GCPs)")
+        if not georeference:
+            print("[4/5] Géoréférencement : DÉSACTIVÉ (mode pixel — défaut)")
+        elif not gcps:
+            print("[4/5] Géoréférencement : sauté (pas de GCPs)")
 
     # 5) Vectorisation + export
     if verbose:
-        print("[5/5] Vectorisation et export GeoJSON")
+        mode = "WGS84" if transform is not None else "PIXEL"
+        print(f"[5/5] Vectorisation et export GeoJSON ({mode})")
 
     H_crop, W_crop = image_hsv.shape[:2]
     crop_filter_bbox_px = (0, 0, W_crop, H_crop)
@@ -225,49 +270,75 @@ def run_pipeline(input_path: str | Path,
             mode=mode_override or filter_bbox_mode,
         )
 
+    def _save_layer(name: str, geoms: list, layer_type: str) -> None:
+        """
+        Sauvegarde une couche en GeoJSON. Deux chemins :
+          - transform=None (mode pixel) → save_geojson_pixel(json.dump)
+          - transform=Affine (mode SIG) → geopandas + save_geojson
+        """
+        if not geoms:
+            return
+        if transform is None:
+            # ── Mode pixel : pas de geopandas, json direct ──────────────────
+            features = []
+            for idx, g in enumerate(geoms):
+                if g is None or g.is_empty:
+                    continue
+                features.append({
+                    "type": "Feature",
+                    "properties": {"layer": name, "id": int(idx)},
+                    "geometry": mapping(g),
+                })
+            gj = {"type": "FeatureCollection", "features": features}
+            out = output_dir / f"{name}.geojson"
+            vec.save_geojson_pixel(gj, out)
+            layers_out[name] = str(out)
+            counts[name] = len(features)
+        else:
+            # ── Mode SIG : geopandas requis ─────────────────────────────────
+            transformed = [_apply_transform_to_geom(g, transform) for g in geoms]
+            gdf = vec.to_geodataframe(transformed, layer_name=name, crs=crs)
+            out = output_dir / f"{name}.geojson"
+            vec.save_geojson(gdf, out)
+            layers_out[name] = str(out)
+            counts[name] = len(transformed)
+
+    # Import shapely.geometry.mapping en local pour ne pas alourdir
+    # le top-level si shapely venait à manquer.
+    from shapely.geometry import mapping
+
     layers_out: Dict[str, str] = {}
     counts: Dict[str, int] = {}
 
     for name in ("water", "vegetation"):
         mask = color_masks.get(name)
         if mask is None: continue
-        polys = vec.mask_to_polygons(mask, transform=None)
+        polys = vec.mask_to_polygons(mask, transform=None, georeference=False)
         polys = _maybe_filter(polys)
-        if transform:
-            polys = [_apply_transform_to_geom(p, transform) for p in polys]
-        if not polys: continue
-        gdf = vec.to_geodataframe(polys, layer_name=name,
-                                   crs=crs if transform else None)
-        out = output_dir / f"{name}.geojson"
-        vec.save_geojson(gdf, out)
-        layers_out[name] = str(out); counts[name] = len(polys)
+        _save_layer(name, polys, "polygon")
 
     for name in ("red_roads", "contours"):
         mask = color_masks.get(name)
         if mask is None or not mask.any(): continue
         skeleton = skeletonize(mask > 0)
-        lines = vec.skeleton_to_lines(skeleton, transform=None)
+        lines = vec.skeleton_to_lines(skeleton, transform=None, georeference=False)
         lines = _maybe_filter(lines, mode_override="centroid")
-        if transform:
-            lines = [_apply_transform_to_geom(ln, transform) for ln in lines]
-        if not lines: continue
-        gdf = vec.to_geodataframe(lines, layer_name=name,
-                                   crs=crs if transform else None)
-        out = output_dir / f"{name}.geojson"
-        vec.save_geojson(gdf, out)
-        layers_out[name] = str(out); counts[name] = len(lines)
+        _save_layer(name, lines, "linestring")
 
     for name, mask in semantic_masks.items():
-        polys = vec.mask_to_polygons(mask, transform=None)
+        polys = vec.mask_to_polygons(mask, transform=None, georeference=False)
         polys = _maybe_filter(polys)
-        if transform:
-            polys = [_apply_transform_to_geom(p, transform) for p in polys]
-        if not polys: continue
-        gdf = vec.to_geodataframe(polys, layer_name=name,
-                                   crs=crs if transform else None)
-        out = output_dir / f"{name}.geojson"
-        vec.save_geojson(gdf, out)
-        layers_out[name] = str(out); counts[name] = len(polys)
+        _save_layer(name, polys, "polygon")
+
+    # ── Libération mémoire après vectorisation ───────────────────────────────
+    # Sur cartes lourdes, image_bgr + image_hsv + 5 masques color + semantic_masks
+    # peuvent peser >500 Mo. On les jette explicitement avant de retourner.
+    del color_masks, semantic_masks
+    try:
+        del image_bgr, image_hsv
+    except NameError:
+        pass
+    gc.collect()
 
     result = PipelineResult(
         input_path=str(input_path),
@@ -275,6 +346,7 @@ def run_pipeline(input_path: str | Path,
         layers=layers_out,
         counts=counts,
         georeferenced=transform is not None,
+        has_georeference=transform is not None,
         legend_removed=remove_legend,
     )
     if verbose:
@@ -295,6 +367,9 @@ def main():
                         help="Désactive la suppression de la légende interne (Stage 2)")
     parser.add_argument("--no-calibrated-hsv", action="store_true",
                         help="Utilise les plages HSV génériques (non calibrées)")
+    parser.add_argument("--georeference", action="store_true",
+                        help="Active le géoréférencement (mode SIG). "
+                             "Par défaut, sortie en coordonnées pixel image.")
     parser.add_argument("--bbox", type=int, nargs=4,
                         metavar=("X1","Y1","X2","Y2"), default=None)
     parser.add_argument("--device",
@@ -304,6 +379,7 @@ def main():
 
     run_pipeline(
         args.input, args.output,
+        georeference=args.georeference,
         with_semantic=args.semantic,
         unet_weights=args.weights,
         auto_crop=not args.no_auto_crop,

@@ -290,43 +290,76 @@ def _extract_hsv_stats_from_polygon(
     polygon_coords: List[List[float]],
     crop_bbox: Tuple[int, int, int, int],
     downscale_factor: float,
+    *,
+    has_georeference: bool = False,
 ) -> Optional[Dict[str, Tuple[float, float]]]:
     """
     Extracts HSV statistics from the pixels inside a corrected polygon.
 
     Args:
         raster_bgr:        Full downscaled raster image (BGR, H×W×3).
-        polygon_coords:    WGS84 or pixel coordinates of the corrected polygon
-                           exterior ring [[lon/x, lat/y], ...].
+        polygon_coords:    Coordinates of the corrected polygon exterior ring.
+                           - has_georeference=False (DÉFAUT) : pixels image
+                             (L.CRS.Simple — Leaflet renvoie directement les
+                             pixels via PIXEL_CRS dans MapViewer.jsx).
+                           - has_georeference=True : WGS84 lon/lat — non
+                             supporté ici (besoin du transform inverse).
         crop_bbox:         (x1, y1, x2, y2) of the map crop in downscaled image.
+                           Sert à savoir si les coords sont en CROP-space
+                           ou en IMAGE-space (voir détection ci-dessous).
         downscale_factor:  Scale applied to the original raster for downscaling.
+        has_georeference:  Indique le CRS dans lequel le polygone est arrivé.
 
     Returns:
         Dict {layer_concept: (p5, p95)} for H, S, V channels.
         None if extraction fails (too few pixels, invalid polygon, etc.).
     """
-    import cv2
+    # Mode SIG : on a besoin du transform inverse pour re-projeter en pixels,
+    # ce que cette fonction ne sait pas faire. On refuse explicitement plutôt
+    # que d'utiliser une heuristique fragile (l'ancien "max(x)<400" cassait
+    # dès qu'on avait une carte ≤ 400 px de large).
+    if has_georeference:
+        logger.debug("[active_learning] Polygone géoréférencé — "
+                      "extraction HSV impossible sans transform inverse")
+        return None
 
-    x1_crop, y1_crop, _, _ = crop_bbox
-
-    # ── Convert polygon to pixel mask ─────────────────────────────────────────
-    # polygon_coords may be in WGS84 (if georeferenced) or pixel space.
-    # We detect which by checking if values are in [0, 360] range (lon/lat)
-    # vs [0, image_width] range (pixels).
     H, W = raster_bgr.shape[:2]
     coords_arr = np.array(polygon_coords, dtype=np.float64)
 
-    if coords_arr[:, 0].max() < 400 and coords_arr[:, 1].max() < 100:
-        # Looks like WGS84 (lon: ~0-400, lat: ~-90 to 90)
-        # Cannot back-project without full transform — skip
-        logger.debug("[active_learning] WGS84 polygon — cannot extract pixels without transform")
+    if coords_arr.size == 0 or coords_arr.ndim != 2 or coords_arr.shape[1] < 2:
+        logger.debug("[active_learning] Polygon vide ou mal formé")
         return None
+
+    # Détection robuste du repère pixel utilisé :
+    # le frontend (PIXEL_CRS) envoie des coords en IMAGE-space full,
+    # tandis que le pipeline interne travaille en CROP-space. On regarde si
+    # les coords sortent du crop : si oui, c'est de l'IMAGE-space et on
+    # n'applique PAS d'offset. Sinon c'est du CROP-space et on offsete.
+    x1_crop, y1_crop, x2_crop, y2_crop = crop_bbox
+    crop_w = max(1, x2_crop - x1_crop)
+    crop_h = max(1, y2_crop - y1_crop)
+
+    xmax = float(coords_arr[:, 0].max())
+    ymax = float(coords_arr[:, 1].max())
+    xmin = float(coords_arr[:, 0].min())
+    ymin = float(coords_arr[:, 1].min())
+
+    pts = coords_arr.copy()
+    if xmax <= crop_w + 2 and ymax <= crop_h + 2 and xmin >= -2 and ymin >= -2:
+        # Looks like CROP-space → offset vers IMAGE-space
+        pts[:, 0] += x1_crop
+        pts[:, 1] += y1_crop
+        logger.debug("[active_learning] Polygon en CROP-space — offset (%d, %d) appliqué",
+                      x1_crop, y1_crop)
     else:
-        # Pixel coordinates in crop space → convert to full image space
-        pts = coords_arr.copy()
-        pts[:, 0] += x1_crop   # x offset
-        pts[:, 1] += y1_crop   # y offset
-        pts = pts.astype(np.int32)
+        logger.debug("[active_learning] Polygon en IMAGE-space — pas d'offset")
+
+    pts = pts.astype(np.int32)
+
+    # Garde-fou : clip aux dimensions de l'image pour éviter un fillPoly
+    # qui dépasse (sans crash mais avec masque tronqué).
+    pts[:, 0] = np.clip(pts[:, 0], 0, W - 1)
+    pts[:, 1] = np.clip(pts[:, 1], 0, H - 1)
 
     # Create binary mask at raster resolution
     mask = np.zeros((H, W), dtype=np.uint8)
@@ -335,6 +368,7 @@ def _extract_hsv_stats_from_polygon(
     # Extract HSV pixels inside the polygon
     hsv = cv2.cvtColor(raster_bgr, cv2.COLOR_BGR2HSV)
     masked_hsv = hsv[mask > 0]
+    del mask, hsv  # libère ~ 4×H×W octets
 
     if len(masked_hsv) < 20:
         logger.debug("[active_learning] Too few pixels inside polygon (%d)", len(masked_hsv))
@@ -473,9 +507,13 @@ def process_correction(correction, map_upload) -> Optional[AdaptiveHSVRange]:
         logger.warning("[active_learning] Unsupported geometry type: %s", geom_type)
         return None
 
-    # Extract HSV statistics from corrected polygon pixels
+    # Extract HSV statistics from corrected polygon pixels.
+    # Le flag has_georeference indique si la correction arrive en WGS84
+    # (Leaflet legacy) ou en pixels (L.CRS.Simple, mode pixel par défaut).
+    map_has_georef = bool(getattr(map_upload, "has_georeference", False))
     hsv_stats = _extract_hsv_stats_from_polygon(
-        img_bgr, exterior_ring, bbox, scale
+        img_bgr, exterior_ring, bbox, scale,
+        has_georeference=map_has_georef,
     )
 
     if hsv_stats is None:

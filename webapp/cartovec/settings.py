@@ -40,56 +40,102 @@ def _str_to_bool(value: str) -> bool:
 # GDAL / GEOS — Windows uniquement
 # Sur Linux/macOS/Colab ces librairies sont trouvées automatiquement.
 #
-# Sur Windows, on définit CONDA_ENV_PATH dans .env (voir .env.example).
-# Si CONDA_ENV_PATH est vide ou invalide, on essaie quelques fallbacks
-# courants avant d'avertir.
+# Toute cette section est ISOLÉE dans une fonction et capture toutes les
+# exceptions : si le chargement GDAL plante (mauvais PATH, DLL manquante,
+# pywin32 cassé), l'app boote quand même et tombe en mode pixel-only.
+# Le drapeau global GDAL_AVAILABLE indique si le SIG est utilisable.
 # ---------------------------------------------------------------------------
-if os.name == 'nt':  # Windows seulement
-    _candidate_paths = []
-    _user_path = os.environ.get('CONDA_ENV_PATH', '').strip()
-    if _user_path:
-        _candidate_paths.append(_user_path)
-    # Fallbacks classiques pour env conda nommé pfa, geo, ou base
-    _username = os.environ.get('USERNAME', '')
-    for _base in (rf'C:\Users\{_username}\anaconda3',
-                  rf'C:\Users\{_username}\miniconda3',
-                  r'C:\ProgramData\anaconda3',
-                  r'C:\ProgramData\miniconda3'):
-        for _env_name in ('pfa', 'geo', ''):  # '' = base env
-            if _env_name:
-                _candidate_paths.append(os.path.join(_base, 'envs', _env_name))
-            else:
-                _candidate_paths.append(_base)
+GDAL_AVAILABLE = False
+GDAL_BIN = None
+GDAL_LIBRARY_PATH = None
+GEOS_LIBRARY_PATH = None
 
-    GDAL_BIN = None
-    for _path in _candidate_paths:
-        if not _path:
-            continue
-        _bin = os.path.join(_path, 'Library', 'bin')
-        if os.path.isdir(_bin) and os.path.exists(os.path.join(_bin, 'geos_c.dll')):
-            GDAL_BIN = _bin
-            break
 
-    if GDAL_BIN:
+def _configure_gdal_windows():
+    """
+    Cherche un env conda contenant geos_c.dll + gdal*.dll et configure
+    PATH + add_dll_directory pour que rasterio/fiona puissent charger.
+
+    Retourne (GDAL_BIN, gdal_lib_path, geos_lib_path) ou (None, None, None).
+    Toutes les exceptions sont capturées et loggées en warning : le boot
+    ne doit JAMAIS planter à cause de GDAL — l'app tournera en mode pixel.
+    """
+    import warnings
+    try:
+        candidate_paths = []
+        user_path = os.environ.get('CONDA_ENV_PATH', '').strip()
+        if user_path:
+            candidate_paths.append(user_path)
+        username = os.environ.get('USERNAME', '')
+        for base in (rf'C:\Users\{username}\anaconda3',
+                     rf'C:\Users\{username}\miniconda3',
+                     r'C:\ProgramData\anaconda3',
+                     r'C:\ProgramData\miniconda3'):
+            for env_name in ('pfa', 'geo', ''):
+                if env_name:
+                    candidate_paths.append(os.path.join(base, 'envs', env_name))
+                else:
+                    candidate_paths.append(base)
+
+        gdal_bin = None
+        for path in candidate_paths:
+            if not path:
+                continue
+            bin_dir = os.path.join(path, 'Library', 'bin')
+            if os.path.isdir(bin_dir) and os.path.exists(os.path.join(bin_dir, 'geos_c.dll')):
+                gdal_bin = bin_dir
+                break
+
+        if not gdal_bin:
+            warnings.warn(
+                "GDAL_BIN introuvable. Mode SIG indisponible — l'app tourne "
+                "en pixel-only. Pour activer le SIG, copie webapp/.env.example "
+                "et définis CONDA_ENV_PATH. "
+                f"Tentés : {candidate_paths[:3]}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
+            return None, None, None
+
+        # Ajoute le dossier au chargeur de DLL (Py 3.8+ Windows)
         try:
-            os.add_dll_directory(GDAL_BIN)
+            os.add_dll_directory(gdal_bin)
         except (OSError, AttributeError):
-            pass  # add_dll_directory disponible seulement sur Windows + Py 3.8+
-        os.environ['PATH'] = GDAL_BIN + os.path.pathsep + os.environ.get('PATH', '')
+            pass
+        os.environ['PATH'] = gdal_bin + os.path.pathsep + os.environ.get('PATH', '')
 
-        gdal_files = [f for f in os.listdir(GDAL_BIN)
+        gdal_files = [f for f in os.listdir(gdal_bin)
                       if f.startswith('gdal') and f.endswith('.dll')]
-        GDAL_LIBRARY_PATH = os.path.join(GDAL_BIN, gdal_files[0] if gdal_files else 'gdal.dll')
-        GEOS_LIBRARY_PATH = os.path.join(GDAL_BIN, 'geos_c.dll')
-    else:
-        import warnings
+        gdal_lib = os.path.join(gdal_bin, gdal_files[0] if gdal_files else 'gdal.dll')
+        geos_lib = os.path.join(gdal_bin, 'geos_c.dll')
+        return gdal_bin, gdal_lib, geos_lib
+
+    except Exception as exc:  # noqa: BLE001
+        # Filet de sécurité ultime : tout (pywin32, permissions, etc.).
         warnings.warn(
-            "GDAL_BIN introuvable. Définis CONDA_ENV_PATH dans webapp/.env "
-            "(copier webapp/.env.example) en pointant vers ton env conda. "
-            f"Tente : {_candidate_paths[:3]}",
+            f"Configuration GDAL ratée ({type(exc).__name__}: {exc}). "
+            "L'app boote en mode pixel-only ; le SIG sera indisponible.",
             RuntimeWarning,
-            stacklevel=1,
+            stacklevel=2,
         )
+        return None, None, None
+
+
+if os.name == 'nt':  # Windows seulement
+    GDAL_BIN, GDAL_LIBRARY_PATH, GEOS_LIBRARY_PATH = _configure_gdal_windows()
+    GDAL_AVAILABLE = GDAL_BIN is not None
+else:
+    # Linux / macOS / Colab : on présume GDAL trouvable, mais on confirme
+    # en testant un import léger. Pas de crash si ça échoue.
+    try:
+        from osgeo import gdal as _gdal_probe  # noqa: F401
+        GDAL_AVAILABLE = True
+    except (ImportError, OSError):
+        try:
+            import rasterio as _rasterio_probe  # noqa: F401
+            GDAL_AVAILABLE = True
+        except (ImportError, OSError):
+            GDAL_AVAILABLE = False
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 PROJECT_ROOT = BASE_DIR.parent  # racine du dépôt (pfa/)

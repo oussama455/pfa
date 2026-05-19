@@ -1,13 +1,76 @@
 # CartoVec - PFA vectorisation de cartes historiques
 
-**Etudiant :** Oussama CHOUAIBI - Geomatique 2e annee  
-**Encadrant :** Kamel BENRAIS - Ingenieur Principal, ELFOULADH  
+**Etudiant :** Oussama CHOUAIBI - Geomatique 2e annee
+**Encadrant :** Kamel BENRAIS - Ingenieur Principal, ELFOULADH
 **Ecole :** EABA - Tunisie
 
 CartoVec transforme des cartes topographiques raster scannees en couches
-vectorielles exploitables dans un SIG. Le projet combine un pipeline Python
-OpenCV/PyTorch/GeoPandas, un agent LangGraph, une API Django REST et une
-interface React/Vite avec Leaflet pour visualiser et corriger les resultats.
+vectorielles GeoJSON exploitables dans QGIS.
+
+> **Si tu decouvres le projet** : commence par le mode SIMPLE ci-dessous.
+> Les modules avances (U-Net, agent LangGraph, active learning, frontend React)
+> sont optionnels et marques **AVANCE** dans cette doc.
+
+---
+
+## Mode SIMPLE (niveau 2e annee geomatique)
+
+Le coeur du projet tient en 5 etapes faciles a comprendre :
+
+1. **Charger** la carte (OpenCV)
+2. **Recadrer** sur le neatline (cadre noir)
+3. **Segmenter** par couleur HSV (seuillage OpenCV)
+4. **Vectoriser** les masques en geometries Shapely
+5. **Sauvegarder** en GeoJSON pour QGIS
+
+Tout est dans `pipeline/simple_pipeline.py` (~150 lignes).
+
+### Lancer en une ligne
+
+```bash
+conda activate pfa
+python scripts/run.py data/raw/carte.png -o data/processed/ma_sortie
+```
+
+### Comprendre etape par etape
+
+Ouvre `notebooks/00_quickstart.ipynb` — il execute les 5 etapes une par une
+avec des images intermediaires pour voir ce qui se passe a chaque etape.
+
+### Utilisation depuis Python
+
+```python
+from pipeline.simple_pipeline import run_simple_pipeline
+
+result = run_simple_pipeline("data/raw/carte.png", "data/processed/sortie")
+print(result.layers)   # {layer_name: chemin_geojson, ...}
+print(result.counts)   # {layer_name: nb_features, ...}
+```
+
+Couches produites :
+- `water.geojson` — hydrographie (polygones bleus)
+- `vegetation.geojson` — vegetation (polygones verts)
+- `buildings.geojson` — batiments (polygones gris)
+- `red_roads.geojson` — routes (LineStrings rouges)
+- `contours.geojson` — courbes de niveau (LineStrings marron)
+
+---
+
+## Mode AVANCE (deep learning + agent + UI)
+
+Si tu veux pousser plus loin que la segmentation couleur, le projet inclut :
+
+- **AVANCE** Pipeline complet avec agent IA : `pipeline/agent.py` (LangGraph).
+- **AVANCE** Segmentation U-Net entrainable : `pipeline/semantic_segmentation.py`
+  + `scripts/train.py --dataset {soduco,semap}`.
+- **AVANCE** Active Learning : `pipeline/active_learning.py` ajuste les
+  plages HSV par serie de carte a partir des corrections humaines.
+- **AVANCE** Backend Django REST : `webapp/cartovec/` avec API
+  `/api/maps/`, `/api/training/`, `/api/weights/`.
+- **AVANCE** Frontend React/Vite : `webapp/frontend/` avec Leaflet
+  (visualisation), Geoman (edition HITL) et panneau d'entrainement.
+
+Pour ces parties, lis la suite du README.
 
 ## Etat actuel
 
@@ -170,6 +233,27 @@ POST   /api/calibration/<series>/reset/
 ```
 
 ## Utilisation du pipeline seul
+
+### Version simple recommandee pour demo PFA
+
+Cette commande lance le coeur de CartoVec sans agent IA, sans U-Net et sans
+active learning. Elle est plus facile a expliquer en soutenance :
+
+```bash
+python -m pipeline.simple_pipeline data/raw/carte.png -o data/processed/simple
+```
+
+Commande encore plus courte pour la demo :
+
+```bash
+python -m pipeline.run_demo data/raw/carte.png
+```
+
+Elle fait uniquement :
+
+1. recadrage de la carte ;
+2. segmentation HSV ;
+3. vectorisation GeoJSON.
 
 Segmentation couleur, vectorisation et detection 2-stages du cadre :
 

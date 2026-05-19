@@ -15,6 +15,7 @@ Testé sur 8 cartes militaires réelles (Tunisie + Algérie, 1:50 000 WWII) :
 """
 from __future__ import annotations
 
+import gc
 import logging
 from dataclasses import dataclass
 from pathlib import Path
@@ -24,6 +25,14 @@ import cv2
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+# ─── Garde-fou OOM ──────────────────────────────────────────────────────────
+# Au-delà de ce seuil sur la plus grande dimension, on force le downscale
+# même si l'appelant a passé un max_dimension plus généreux. Sur RTX 2050
+# (4 Go VRAM) et 16 Go RAM, des cartes > 6000 px (TIFF) saturent rapidement
+# OpenCV (cv2.findContours alloue plusieurs buffers internes).
+HARD_MAX_DIMENSION = 6000
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -46,16 +55,49 @@ def downscale_if_too_large(image_bgr: np.ndarray, *,
                             interpolation: int = cv2.INTER_AREA) -> np.ndarray:
     """
     Redimensionne si la plus grande dimension dépasse max_dimension.
-    Sur RTX 2050 (4 GB VRAM) : max_dimension=2400 → sûr pour l'inférence.
+
+    Garde-fou OOM : si l'appelant passe un max_dimension trop généreux
+    (> HARD_MAX_DIMENSION=6000), on l'écrête silencieusement à 6000 et
+    on log un warning. C'est la dernière barrière avant `cv2.error:
+    Insufficient memory` qu'on a vu en prod sur des cartes 12000×8000.
+
+    Après le resize, on libère explicitement l'ancien buffer via `del`
+    et on force un gc.collect() — utile en background thread Django où
+    la libération est retardée par le GIL.
     """
     H, W = image_bgr.shape[:2]
     longest = max(H, W)
+
+    if max_dimension > HARD_MAX_DIMENSION:
+        logger.warning(
+            "max_dimension=%d écrêté à HARD_MAX_DIMENSION=%d pour éviter "
+            "OOM OpenCV.", max_dimension, HARD_MAX_DIMENSION,
+        )
+        max_dimension = HARD_MAX_DIMENSION
+
     if longest <= max_dimension:
         return image_bgr
+
     scale = max_dimension / longest
-    return cv2.resize(image_bgr,
-                      (int(round(W * scale)), int(round(H * scale))),
-                      interpolation=interpolation)
+    new_w = int(round(W * scale))
+    new_h = int(round(H * scale))
+    try:
+        resized = cv2.resize(image_bgr, (new_w, new_h), interpolation=interpolation)
+    except cv2.error as exc:
+        # Si même le resize échoue (carte vraiment énorme), on tente un
+        # downscale plus agressif vers 2400 et on relance.
+        logger.warning("cv2.resize a échoué (%s). Repli à max_dim=2400.", exc)
+        scale = 2400 / longest
+        new_w = int(round(W * scale))
+        new_h = int(round(H * scale))
+        resized = cv2.resize(image_bgr, (new_w, new_h), interpolation=interpolation)
+
+    # Libère le buffer source si l'appelant ne le garde pas — il vient
+    # typiquement de cv2.imread, on peut le jeter.
+    if resized is not image_bgr:
+        del image_bgr
+        gc.collect()
+    return resized
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -147,21 +189,55 @@ def _detect_frame_at_threshold(image_bgr, dark_threshold, min_area_ratio,
     """
     Implementation de bas niveau : binarise a `dark_threshold` et cherche
     le meilleur contour rectangulaire. Retourne (x, y, w, h) ou None.
+
+    Robustesse mémoire : si l'image est très grande, on travaille sur une
+    version downscalée (max 3000 px) pour la détection, puis on remet à
+    l'échelle le rectangle final. cv2.findContours/cv2.dilate sont aussi
+    enveloppés dans un try/except cv2.error pour ne pas crasher le worker.
     """
     H, W = image_bgr.shape[:2]
     img_area = W * H
     cx, cy = W // 2, H // 2
 
-    gray = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2GRAY)
+    # ── Garde-fou OOM : downscale interne si l'image est très grande ────────
+    work_scale = 1.0
+    work_img = image_bgr
+    if max(H, W) > 3000:
+        work_scale = 3000.0 / max(H, W)
+        work_img = cv2.resize(
+            image_bgr,
+            (int(round(W * work_scale)), int(round(H * work_scale))),
+            interpolation=cv2.INTER_AREA,
+        )
+
+    gray = cv2.cvtColor(work_img, cv2.COLOR_BGR2GRAY)
     _, binary = cv2.threshold(gray, dark_threshold, 255, cv2.THRESH_BINARY_INV)
+    del gray  # libère ~ work_h * work_w octets
     kernel = cv2.getStructuringElement(cv2.MORPH_RECT,
                                         (morph_kernel_size, morph_kernel_size))
-    binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+    try:
+        binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+        contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL,
+                                        cv2.CHAIN_APPROX_SIMPLE)
+    except cv2.error as exc:
+        logger.warning("findContours / morphologyEx OOM : %s — frame ignorée", exc)
+        del binary
+        gc.collect()
+        return None
+    finally:
+        # libère le binaire et le buffer intermédiaire dès que possible
+        del binary
 
-    contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL,
-                                    cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
+
+    # Si on a downscalé pour la détection, on remet le rect à l'échelle finale
+    if work_scale != 1.0:
+        rescaled = []
+        inv = 1.0 / work_scale
+        for cnt in contours:
+            rescaled.append((cnt * inv).astype(cnt.dtype))
+        contours = rescaled
 
     ar_min, ar_max = aspect_ratio_range
     candidates = []
@@ -415,6 +491,11 @@ def preprocess_with_crop(path: str | Path, *,
         x1, y1, x2, y2 = 0, 0, W, H
 
     img_cropped = crop_to_frame(img, (x1, y1, x2, y2))
+
+    # On a fait une copie du crop, l'image source n'est plus utile :
+    # libère ~H×W×3 octets (peut représenter 70 Mo sur une carte 4800×2400).
+    del img
+    gc.collect()
 
     # Stage 2 : légende interne
     legend_x = 0

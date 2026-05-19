@@ -17,12 +17,16 @@ des lignes fines (quadrillage).
 """
 from __future__ import annotations
 
+import gc
+import logging
 from dataclasses import dataclass
 from typing import Dict, Optional, Tuple
 
 import cv2
 import numpy as np
 from skimage.morphology import skeletonize
+
+logger = logging.getLogger(__name__)
 
 
 # -----------------------------------------------------------
@@ -272,6 +276,8 @@ def extract_all_color_layers(hsv: np.ndarray, *,
     rd_low  = mask_from_range(hsv, active_ranges["red_roads"])
     rd_high = mask_from_range(hsv, active_red_high)
     rd_raw  = cv2.bitwise_or(rd_low, rd_high)
+    # Libère les deux sous-masques dès la fusion faite (économise H×W octets ×2)
+    del rd_low, rd_high
     if clean:
         rd_raw = clean_mask(rd_raw, open_kernel=2, close_kernel=3, min_area=30)
     rd_raw = skeletonize_mask(rd_raw)
@@ -284,6 +290,10 @@ def extract_all_color_layers(hsv: np.ndarray, *,
         if clean:
             bld_raw = clean_mask(bld_raw, open_kernel=3, close_kernel=5, min_area=50)
         layers["buildings"] = bld_raw
+
+    # Sur grosses images on libère tout le scratch numpy avant de rendre la main
+    if hsv.size > 8_000_000:   # ~ 2400×3400×3 dépasse ce seuil
+        gc.collect()
 
     return layers
 

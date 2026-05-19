@@ -40,6 +40,7 @@ function App() {
   const [error, setError] = useState("");
   const [form, setForm] = useState({
     title: "", map_name: "", raster: null, unet_weights: null,
+    georeference: false,
   });
   const [showTraining, setShowTraining] = useState(false);
 
@@ -101,6 +102,7 @@ function App() {
     body.append("title", form.title || form.raster.name);
     body.append("map_name", form.map_name);
     body.append("raster", form.raster);
+    body.append("georeference", form.georeference ? "true" : "false");
     if (form.unet_weights) {
       body.append("unet_weights", form.unet_weights);
     }
@@ -112,7 +114,8 @@ function App() {
       setSelectedId(data.id);
       setSelectedMap(data);
       setForm({ title: "", map_name: "", raster: null,
-                unet_weights: form.unet_weights });
+                unet_weights: form.unet_weights,
+                georeference: form.georeference });
       event.target.reset();
       setError("");
     } catch (err) {
@@ -198,6 +201,24 @@ function App() {
               onChange={(v) => setForm((s) => ({ ...s, unet_weights: v }))}
             />
           </div>
+          <label
+            style={{
+              display: "flex", alignItems: "center", gap: 6, marginTop: 10,
+              cursor: "pointer", fontSize: 12,
+            }}
+            title="Décoché (défaut) : sortie en coordonnées pixel image, prête
+pour un calque direct sur le raster. Coché : applique le géoréférencement
+AMS/GSGS pour produire du WGS84/EPSG:4326."
+          >
+            <input
+              type="checkbox"
+              checked={form.georeference}
+              onChange={(e) =>
+                setForm((s) => ({ ...s, georeference: e.target.checked }))
+              }
+            />
+            <span>Activer le géoréférencement (SIG)</span>
+          </label>
           <button type="submit" disabled={uploading}>
             {uploading ? "Envoi..." : "Lancer"}
           </button>
@@ -290,8 +311,10 @@ function App() {
             <section className="viewer-panel">
               <MapViewer
                 mapId={selected.id}
-                rasterUrl={selected.raster_url}
+                rasterUrl={selected.original_image_url || selected.raster_url}
                 rasterBounds={defaultBounds(selected)}
+                rasterSize={selected.raster_size || null}
+                hasGeoreference={!!selected.has_georeference}
                 apiBaseUrl={API_BASE}
               />
             </section>

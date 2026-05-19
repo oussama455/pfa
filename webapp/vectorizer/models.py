@@ -52,6 +52,14 @@ class MapUpload(models.Model):
     )
 
     # ── Geo ───────────────────────────────────────────────────────────────────
+    # has_georeference : True = la carte a été traitée en mode SIG (coords WGS84).
+    #                    False (défaut) = mode pixel image (Leaflet CRS.Simple).
+    # Distinct de georef_crs qui reflète le CRS *effectivement* produit ; ce
+    # champ-ci reflète ce que l'utilisateur a *demandé* au moment de l'upload.
+    has_georeference = models.BooleanField(
+        default=False,
+        help_text="True si la carte a été traitée avec géoréférencement actif."
+    )
     georef_crs    = models.CharField(max_length=50, blank=True, null=True)
     raster_bounds = models.JSONField(blank=True, null=True,
         help_text="[[lat_sw, lon_sw], [lat_ne, lon_ne]] for Leaflet ImageOverlay")
@@ -110,7 +118,8 @@ class MapUpload(models.Model):
 
     def mark_done(self, *, map_type=None, confidence_score=None,
                   qa_passed=False, retry_count=0,
-                  georef_crs=None, raster_bounds=None):
+                  georef_crs=None, raster_bounds=None,
+                  has_georeference=None):
         self.status        = 'done'
         self.finished_at   = timezone.now()
         self.error_message = None
@@ -120,10 +129,12 @@ class MapUpload(models.Model):
         if retry_count       is not None: self.retry_count       = retry_count
         if georef_crs        is not None: self.georef_crs        = georef_crs
         if raster_bounds     is not None: self.raster_bounds     = raster_bounds
+        if has_georeference  is not None: self.has_georeference  = has_georeference
         self.save(update_fields=[
             'status', 'finished_at', 'error_message',
             'map_type', 'confidence_score', 'qa_passed',
-            'retry_count', 'georef_crs', 'raster_bounds', 'updated_at',
+            'retry_count', 'georef_crs', 'raster_bounds',
+            'has_georeference', 'updated_at',
         ])
 
     def mark_failed(self, error: str):

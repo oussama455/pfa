@@ -1,23 +1,27 @@
 """
-Pipeline de vectorisation de cartes -- PFA Oussama CHOUAIBI.
+CartoVec pipeline.
 
-Chaine de traitement : raster -> pretraitement -> segmentation (couleur + IA)
--> vectorisation -> geo-referencement -> export GeoJSON.
+Lecture simple pour soutenance :
+    1. preprocessing.py       -> recadrer la carte
+    2. color_segmentation.py  -> extraire les couleurs cartographiques
+    3. vectorization.py       -> produire des couches GeoJSON
 
-Imports paresseux : les sous-modules ne sont charges que si tu les importes
-explicitement, pour eviter d'imposer torch / rasterio / skimage quand
-tu n'utilises qu'une partie du pipeline.
+Point d'entree recommande :
+    from pipeline.simple_pipeline import run_simple_pipeline
 
-Modules principaux : preprocessing, color_segmentation, semantic_segmentation,
-vectorization, georeferencing, pipeline, agent, active_learning, dataset,
-semap_dataset, map_frame_detector, grid_extraction, cc_postprocess,
-create_masks, paths.
+Les autres modules restent disponibles, mais sont avances :
+    - semantic_segmentation.py : U-Net
+    - georeferencing.py       : GCP et projection
+    - agent.py                : LangGraph
+    - active_learning.py      : corrections HSV progressives
 """
 
 __version__ = "0.2.0"
 __author__ = "Oussama CHOUAIBI"
 
 __all__ = [
+    "run_simple_pipeline",
+    "simple_pipeline",
     "preprocessing",
     "map_frame_detector",
     "color_segmentation",
@@ -34,3 +38,11 @@ __all__ = [
     "paths",
     "create_masks",
 ]
+
+
+def __getattr__(name):
+    """Import paresseux : charge le pipeline simple seulement si demande."""
+    if name == "run_simple_pipeline":
+        from .simple_pipeline import run_simple_pipeline
+        return run_simple_pipeline
+    raise AttributeError(f"module 'pipeline' has no attribute {name!r}")

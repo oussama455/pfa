@@ -19,6 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import List, Optional
 
+import cv2
 import numpy as np
 
 try:
@@ -131,28 +132,169 @@ def build_unet(*, encoder_name: str = "resnet34",
     return model
 
 
+_KNOWN_ENCODERS = (
+    "resnet18", "resnet34", "resnet50", "resnet101", "resnet152",
+    "resnext50_32x4d", "efficientnet-b0", "efficientnet-b1",
+    "mobilenet_v2", "vgg11", "vgg16",
+)
+
+
+def _infer_encoder_from_state(state: dict) -> Optional[str]:
+    """
+    Devine l'encoder ResNet d'après les clés du state_dict.
+
+    Méthode : on regarde la forme de `encoder.conv1.weight` (ResNet) ou
+    de `encoder._conv_stem.weight` (EfficientNet) et le nombre de blocs
+    dans encoder.layer1/2/3/4.
+
+    Retourne 'resnet18'/'resnet34'/'resnet50'/'resnet101' ou None.
+    """
+    keys = list(state.keys()) if hasattr(state, "keys") else []
+    if not any(k.startswith("encoder.conv1.weight") for k in keys):
+        return None
+
+    # Comptage des sous-blocs des layers ResNet
+    def count_blocks(prefix: str) -> int:
+        seen = set()
+        for k in keys:
+            if k.startswith(prefix):
+                rest = k[len(prefix):]
+                head = rest.split(".", 1)[0]
+                if head.isdigit():
+                    seen.add(int(head))
+        return len(seen)
+
+    n1 = count_blocks("encoder.layer1.")
+    n2 = count_blocks("encoder.layer2.")
+    n3 = count_blocks("encoder.layer3.")
+    n4 = count_blocks("encoder.layer4.")
+    layout = (n1, n2, n3, n4)
+
+    # Tables de blocs des ResNet officiels
+    mapping = {
+        (2, 2, 2, 2):  "resnet18",
+        (3, 4, 6, 3):  "resnet34",  # ou resnet50 — on désambiguïse par conv3 bottleneck
+        (3, 4, 23, 3): "resnet101",
+        (3, 8, 36, 3): "resnet152",
+    }
+    candidate = mapping.get(layout)
+    if candidate is None:
+        return None
+
+    # ResNet34 (BasicBlock, 2 conv) vs ResNet50 (Bottleneck, 3 conv) :
+    # on regarde si la clé `encoder.layer1.0.conv3.weight` existe.
+    if candidate == "resnet34":
+        for k in keys:
+            if k.startswith("encoder.layer1.0.conv3"):
+                return "resnet50"
+        return "resnet34"
+    return candidate
+
+
 def load_weights(model, weights_path: str | Path,
-                 device: Optional[str] = None):
-    """Charge des poids sauvegardes (.pth) avec auto-detection GPU/CPU."""
+                 device: Optional[str] = None,
+                 *,
+                 strict: bool = False,
+                 auto_rebuild: bool = True):
+    """
+    Charge des poids sauvegardes (.pth) avec auto-détection GPU/CPU.
+
+    Robustesse :
+        - Tente d'abord `weights_only=True` (sécurité PyTorch 2.4+),
+          retombe sur `weights_only=False` si le fichier est plus ancien.
+        - Extrait `state_dict` si le checkpoint est un dict imbriqué
+          (formats Lightning, custom training scripts, ...).
+        - strict=False par défaut : un mismatch n'écrit qu'un log clair
+          (missing / unexpected / shape mismatch) au lieu de crasher
+          le worker. Le modèle revient même si quelques têtes diffèrent.
+        - auto_rebuild=True : si le state_dict pointe clairement vers un
+          autre encoder (ex. checkpoint resnet50 chargé sur smp.Unet
+          resnet34), on tente de rebuild le modèle avec le bon encoder.
+
+    Lève FileNotFoundError uniquement si le fichier manque ; tout autre
+    problème (clé manquante, shape) est logué et retourné gracieusement.
+    """
     _require_torch()
     weights_path = Path(weights_path)
     if not weights_path.exists():
         raise FileNotFoundError(f"Poids introuvables : {weights_path}")
-    
+
     dev = device or get_device(verbose=False)
-    
-    # التعديل هنا: إضافة weights_only=True لتجنب التحذير الأمني
+
+    # ── 1) Lire le checkpoint ────────────────────────────────────────────────
     try:
         state = torch.load(str(weights_path), map_location=dev, weights_only=True)
     except Exception:
-        # في حال فشل التحميل الآمن (بسبب بنية ملف قديمة)، نعود للطريقة العادية مع تنبيه
-        print("  Info: Chargement en mode weights_only=False pour compatibilité.")
+        # Checkpoint plus ancien ou contient des objets pickled non-tensor.
+        # On retombe sur weights_only=False, avec avertissement.
+        print(f"  [load_weights] Chargement non sécurisé pour compat : {weights_path.name}")
         state = torch.load(str(weights_path), map_location=dev, weights_only=False)
-        
+
     if isinstance(state, dict) and "state_dict" in state:
         state = state["state_dict"]
-        
-    model.load_state_dict(state)
+    if not isinstance(state, dict):
+        raise TypeError(
+            f"Le checkpoint {weights_path.name} n'est pas un state_dict "
+            f"(type={type(state).__name__})."
+        )
+
+    # ── 2) Auto-rebuild si l'encoder du checkpoint diffère du modèle courant ─
+    if auto_rebuild:
+        ckpt_encoder = _infer_encoder_from_state(state)
+        current_encoder = getattr(getattr(model, "encoder", None),
+                                    "_get_name", lambda: None)()
+        # Normalisation case-insensitive
+        current_enc_str = (current_encoder or "").lower() if current_encoder else ""
+        if (ckpt_encoder and ckpt_encoder in _KNOWN_ENCODERS
+                and ckpt_encoder.lower() not in current_enc_str):
+            print(f"  [load_weights] Encoder du checkpoint = '{ckpt_encoder}', "
+                  f"modèle courant = '{current_encoder}' → rebuild.")
+            # Récupère le nombre de classes du modèle courant pour le rebuild
+            try:
+                # smp.Unet expose model.segmentation_head[0].out_channels
+                n_classes = model.segmentation_head[0].out_channels
+            except Exception:
+                n_classes = 2  # fallback raisonnable
+            model = smp.Unet(
+                encoder_name=ckpt_encoder,
+                encoder_weights=None,   # on va charger les poids
+                in_channels=3,
+                classes=n_classes,
+                activation=None,        # cohérent avec inference argmax
+            )
+            model.to(dev)
+
+    # ── 3) Chargement défensif ───────────────────────────────────────────────
+    try:
+        result = model.load_state_dict(state, strict=strict)
+    except RuntimeError as exc:
+        # Capture les shape mismatch (typiquement classes différentes)
+        print(f"  [load_weights] RuntimeError lors du chargement : {exc}")
+        print(f"  [load_weights] Repli sur strict=False pour ne pas crasher.")
+        result = model.load_state_dict(state, strict=False)
+
+    # PyTorch retourne NamedTuple (missing_keys, unexpected_keys) en mode
+    # non-strict. On log un résumé exploitable plutôt que le mur de clés brut.
+    missing = list(getattr(result, "missing_keys", []) or [])
+    unexpected = list(getattr(result, "unexpected_keys", []) or [])
+    if missing or unexpected:
+        # Regroupe les missing/unexpected par préfixe pour rester lisible.
+        def head(k: str) -> str:
+            parts = k.split(".")
+            return ".".join(parts[:3]) if len(parts) >= 3 else k
+
+        from collections import Counter
+        if missing:
+            top_missing = Counter(head(k) for k in missing).most_common(5)
+            print(f"  [load_weights] {len(missing)} clés MANQUANTES dans le checkpoint "
+                  f"(top préfixes) : {top_missing}")
+        if unexpected:
+            top_unexpected = Counter(head(k) for k in unexpected).most_common(5)
+            print(f"  [load_weights] {len(unexpected)} clés EN TROP dans le checkpoint "
+                  f"(top préfixes) : {top_unexpected}")
+        print(f"  [load_weights] Le modèle continue avec des poids partiels — "
+              f"les couches manquantes restent à leur init aléatoire/ImageNet.")
+
     model.to(dev).eval()
     return model
 
@@ -161,6 +303,29 @@ def load_weights(model, weights_path: str | Path,
 # ---------------------------------------------------------------------
 _IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
 _IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+# U-Net SMP a 5 niveaux de downsample → l'entrée doit être un multiple de 32
+# en H ET en W, sinon device-side assert dans le bloc de pooling.
+UNET_DOWNSAMPLE = 32
+
+
+def _pad_to_multiple(image: np.ndarray, multiple: int = UNET_DOWNSAMPLE
+                      ) -> tuple[np.ndarray, tuple[int, int, int, int]]:
+    """
+    Pad une image RGB (H×W×3) en bas et à droite pour que H et W soient
+    multiples de `multiple`. Retourne (image_paddée, (top, bottom, left, right))
+    pour pouvoir recropper le masque de sortie.
+    """
+    h, w = image.shape[:2]
+    new_h = ((h + multiple - 1) // multiple) * multiple
+    new_w = ((w + multiple - 1) // multiple) * multiple
+    bottom = new_h - h
+    right  = new_w - w
+    if bottom == 0 and right == 0:
+        return image, (0, 0, 0, 0)
+    padded = cv2.copyMakeBorder(image, 0, bottom, 0, right,
+                                  borderType=cv2.BORDER_REFLECT_101)
+    return padded, (0, bottom, 0, right)
 
 
 def _to_tensor(image_rgb: np.ndarray, device: str):
@@ -171,6 +336,52 @@ def _to_tensor(image_rgb: np.ndarray, device: str):
     return torch.from_numpy(img).unsqueeze(0).to(device)
 
 
+def _safe_forward(model, image_rgb: np.ndarray, device: str):
+    """
+    Forward défensif : pad l'image à multiple de 32, push sur device, gère
+    les RuntimeError CUDA (OOM, kernel asynchrone, unknown error) en faisant :
+        1. torch.cuda.empty_cache()
+        2. log warning
+        3. retry sur CPU
+    Retourne (logits, padding_info, device_used).
+    """
+    import cv2 as _cv2  # local pour éviter circular si torch absent
+
+    padded, padding = _pad_to_multiple(image_rgb, UNET_DOWNSAMPLE)
+    tensor = _to_tensor(padded, device)
+
+    try:
+        with torch.no_grad():
+            logits = model(tensor)
+        return logits, padding, device
+    except RuntimeError as exc:
+        msg = str(exc)
+        is_cuda_err = ("CUDA" in msg or "cuda" in msg
+                        or "device-side" in msg or "out of memory" in msg)
+        print(f"  [_safe_forward] RuntimeError ({type(exc).__name__}): {msg[:200]}")
+        if is_cuda_err and device != "cpu":
+            print("  [_safe_forward] → empty_cache + repli sur CPU")
+            try:
+                torch.cuda.empty_cache()
+            except Exception:
+                pass
+            model.to("cpu").eval()
+            tensor = _to_tensor(padded, "cpu")
+            with torch.no_grad():
+                logits = model(tensor)
+            return logits, padding, "cpu"
+        raise
+
+
+def _crop_padding(arr: np.ndarray, padding: tuple[int, int, int, int]
+                   ) -> np.ndarray:
+    """Recrop d'une image 2D selon (top, bottom, left, right)."""
+    top, bottom, left, right = padding
+    h, w = arr.shape[:2]
+    return arr[top:h - bottom if bottom else h,
+               left:w - right if right else w]
+
+
 def predict_mask(model, image_rgb: np.ndarray,
                  device: Optional[str] = None,
                  target_class: int = 1) -> np.ndarray:
@@ -178,10 +389,9 @@ def predict_mask(model, image_rgb: np.ndarray,
     _require_torch()
     dev = device or get_device(verbose=False)
     model.to(dev).eval()
-    tensor = _to_tensor(image_rgb, dev)
-    with torch.no_grad():
-        logits = model(tensor)
-        preds = torch.argmax(logits, dim=1).squeeze(0).cpu().numpy()
+    logits, padding, _used = _safe_forward(model, image_rgb, dev)
+    preds = torch.argmax(logits, dim=1).squeeze(0).cpu().numpy()
+    preds = _crop_padding(preds, padding)
     return ((preds == target_class) * 255).astype(np.uint8)
 
 
@@ -192,24 +402,36 @@ def predict_multi_class(model, image_rgb: np.ndarray,
     """
     Un masque uint8 par classe, retourne {nom: masque}.
 
-    class_names : un nom par classe DANS L'ORDRE DES INDEX du modele
-        (0, 1, 2, ...). Si la longueur est num_classes-1, on suppose que
-        tu as oublie la classe 0 et on la nomme 'background' (compat
-        retro avec l'ancien usage).
+    Robustesse :
+        - L'entrée est paddée à multiple de 32 (refléxion sur les bords)
+          AVANT d'aller sur le device — évite les device-side assert sur
+          les blocs MaxPool/Upsample du U-Net.
+        - L'inférence est wrappée par _safe_forward qui retombe sur CPU
+          si une RuntimeError CUDA est levée.
 
-    include_class_zero :
-        - True (defaut) : on retourne aussi le masque de la classe 0
-          (typiquement 'background' — utile pour debug ou pour le filtrer
-          dans l'appelant).
-        - False : on saute la classe 0 (ancien comportement).
+    class_names : un nom par classe DANS L'ORDRE DES INDEX du modele.
     """
     _require_torch()
     dev = device or get_device(verbose=False)
     model.to(dev).eval()
-    tensor = _to_tensor(image_rgb, dev)
-    with torch.no_grad():
-        logits = model(tensor)
-        preds = torch.argmax(logits, dim=1).squeeze(0).cpu().numpy()
+
+    # Garde-fou : downscale agressif si l'image est trop grande pour le GPU.
+    # 2400 px reste l'idéal sur 4 Go VRAM ; au-delà on retombe sur CPU/OOM.
+    h, w = image_rgb.shape[:2]
+    if max(h, w) > 2400 and dev == "cuda":
+        import cv2 as _cv2
+        scale = 2400 / max(h, w)
+        image_rgb = _cv2.resize(
+            image_rgb, (int(round(w * scale)), int(round(h * scale))),
+            interpolation=_cv2.INTER_AREA,
+        )
+        print(f"  [predict_multi_class] downscale GPU {w}×{h} -> "
+              f"{image_rgb.shape[1]}×{image_rgb.shape[0]}")
+
+    logits, padding, _used = _safe_forward(model, image_rgb, dev)
+    preds = torch.argmax(logits, dim=1).squeeze(0).cpu().numpy()
+    preds = _crop_padding(preds, padding)
+
     n_classes = logits.shape[1]
     if class_names is None:
         class_names = [f"class_{i}" for i in range(n_classes)]
