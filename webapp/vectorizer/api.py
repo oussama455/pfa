@@ -40,6 +40,16 @@ def _parse_bool(value, *, default: bool = False) -> bool:
     return str(value).strip().lower() in ("true", "1", "yes", "on")
 
 
+def _feature_id(feature: dict) -> str:
+    props = feature.get("properties") or {}
+    value = props.get("label_id")
+    if value is None:
+        value = props.get("id")
+    if value is None:
+        value = feature.get("id", "")
+    return str(value)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Serializers
 # ─────────────────────────────────────────────────────────────────────────────
@@ -411,8 +421,7 @@ def _apply_delete_to_geojson(
         original_count = len(gj.get("features", []))
         gj["features"] = [
             feat for feat in gj.get("features", [])
-            if str(feat.get("properties", {}).get("label_id", "")) != feature_id
-            and str(feat.get("id", "")) != feature_id
+            if _feature_id(feat) != feature_id
         ]
 
         if len(gj["features"]) < original_count:
@@ -439,8 +448,7 @@ def _apply_edit_to_geojson(
             gj = json.load(f)
 
         for feat in gj.get("features", []):
-            fid = str(feat.get("properties", {}).get("label_id", "")) or str(feat.get("id", ""))
-            if fid == feature_id:
+            if _feature_id(feat) == feature_id:
                 feat["geometry"] = new_geometry
                 break
 

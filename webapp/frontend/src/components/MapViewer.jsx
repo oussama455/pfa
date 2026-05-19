@@ -85,6 +85,10 @@ const PENDING_DELETE_STYLE = {
   dashArray: "4, 4",
 };
 
+function getFeatureId(feature) {
+  return feature?.properties?.label_id ?? feature?.properties?.id ?? feature?.id;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Sub-component: Geoman edit toolbar initializer
 // ─────────────────────────────────────────────────────────────────────────────
@@ -146,12 +150,13 @@ function FeatureInspector({ feature, layerName, onDelete, onSaveEdit, onClose })
   if (!feature) return null;
 
   const props = feature.properties || {};
+  const featureId = getFeatureId(feature);
 
   return (
     <div style={inspectorStyles.panel}>
       <div style={inspectorStyles.header}>
         <span style={inspectorStyles.title}>
-          {layerName} · Feature #{props.label_id ?? "—"}
+          {layerName} · Feature #{featureId ?? "-"}
         </span>
         <button onClick={onClose} style={inspectorStyles.closeBtn} title="Close">✕</button>
       </div>
@@ -465,7 +470,8 @@ export default function MapViewer({
   const handleDelete = useCallback(() => {
     if (!selectedFeature) return;
     const { feature, layerName } = selectedFeature;
-    const featureId = feature.properties?.label_id ?? feature.id;
+    const featureId = getFeatureId(feature);
+    if (featureId == null) return;
 
     // Optimistic: add to local deleted set
     setDeletedIds(ids => new Set([...ids, `${layerName}::${featureId}`]));
@@ -479,14 +485,15 @@ export default function MapViewer({
   const handleFeatureEdited = useCallback((leafletLayer) => {
     if (!selectedFeature) return;
     const { feature, layerName } = selectedFeature;
-    const featureId = feature.properties?.label_id ?? feature.id;
+    const featureId = getFeatureId(feature);
+    if (featureId == null) return;
     const newGeoJSON = leafletLayer.toGeoJSON().geometry;
     addEdit(layerName, featureId, newGeoJSON);
   }, [selectedFeature, addEdit]);
 
   // ── GeoJSON style function (per feature) ─────────────────────────────────
   const styleFeature = useCallback((layerName) => (feature) => {
-    const featureId = feature.properties?.label_id ?? feature.id;
+    const featureId = getFeatureId(feature);
     const key = `${layerName}::${featureId}`;
     if (deletedIds.has(key)) return PENDING_DELETE_STYLE;
     return LAYER_STYLES[layerName] || LAYER_STYLES.default;
@@ -587,7 +594,7 @@ export default function MapViewer({
           const filteredGJ = {
             ...geojson,
             features: geojson.features.filter(f => {
-              const fid = f.properties?.label_id ?? f.id;
+              const fid = getFeatureId(f);
               return !deletedIds.has(`${layerName}::${fid}`);
             }),
           };
