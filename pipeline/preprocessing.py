@@ -50,6 +50,24 @@ def load_image(path: str | Path) -> np.ndarray:
     return img
 
 
+def compute_downscale_scale(width: int, height: int, *,
+                             max_dimension: int = 2400) -> float:
+    """
+    Retourne le facteur d'échelle appliqué par downscale_if_too_large.
+
+        downscaled_dim = original_dim * scale   (scale ≤ 1.0)
+
+    Sert à reconstruire la transformation crop→image originale dans le
+    pipeline pixel (réalignement des vecteurs sur le raster non rogné).
+    Centralise la règle pour qu'elle reste cohérente avec le downscale réel.
+    """
+    longest = max(width, height)
+    md = min(max_dimension, HARD_MAX_DIMENSION)
+    if longest <= md or longest == 0:
+        return 1.0
+    return md / float(longest)
+
+
 def downscale_if_too_large(image_bgr: np.ndarray, *,
                             max_dimension: int = 2400,
                             interpolation: int = cv2.INTER_AREA) -> np.ndarray:

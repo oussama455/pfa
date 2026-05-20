@@ -358,6 +358,124 @@ def clip_features_to_bbox(geometries,
     return out
 
 
+# =====================================================================
+# Réalignement pixel : crop+downscale  ->  image originale non rognée
+# =====================================================================
+def apply_pixel_offset(geometries, *,
+                        offset: tuple[float, float] = (0.0, 0.0),
+                        scale: float = 1.0):
+    """
+    Translate puis met à l'échelle une liste de géométries pour les ramener
+    de l'espace MASQUE (rogné + downscalé) vers l'espace IMAGE ORIGINALE.
+
+    Transformation appliquée à chaque sommet :
+
+        X_final = (X_mask + offset_x) * scale
+        Y_final = (Y_mask + offset_y) * scale
+
+    où :
+        offset = (x1, y1) = coin haut-gauche du crop, en coords DOWNSCALÉES
+        scale  = 1 / facteur_downscale  (≥ 1) pour repasser en pleine résolution
+
+    Quand offset=(0,0) et scale=1.0, la fonction est un no-op (cas image
+    déjà pleine résolution sans rognage).
+
+    Robustesse : une liste vide retourne une liste vide ; les géométries
+    None / vides sont ignorées sans lever d'exception.
+    """
+    if not geometries:
+        return []
+    dx, dy = offset
+    is_identity = (dx == 0.0 and dy == 0.0 and scale == 1.0)
+    if is_identity:
+        # Rien à faire — on filtre quand même les vides pour rester cohérent.
+        return [g for g in geometries if g is not None and not g.is_empty]
+
+    from shapely.affinity import affine_transform
+    # Matrice affine shapely : [a, b, d, e, xoff, yoff]
+    #   x' = a*x + b*y + xoff
+    #   y' = d*x + e*y + yoff
+    # On veut x' = scale*x + scale*dx  ->  a=scale, xoff=scale*dx
+    matrix = [scale, 0.0, 0.0, scale, scale * dx, scale * dy]
+
+    out = []
+    for g in geometries:
+        if g is None or g.is_empty:
+            continue
+        try:
+            out.append(affine_transform(g, matrix))
+        except Exception:  # noqa: BLE001 — géométrie pathologique : on garde l'originale
+            out.append(g)
+    return out
+
+
+# =====================================================================
+# Lissage géométrique (anti "staircase" pixel)
+# =====================================================================
+def smooth_geometries(geometries, *, tolerance: float = 0.5):
+    """
+    Lisse une liste de géométries Shapely avec Douglas-Peucker
+    (preserve_topology=True). Élimine l'effet d'escalier dû à la
+    segmentation pixel par pixel.
+
+    tolerance : en UNITÉS de la géométrie. En pixels, 0.5 = demi-pixel.
+        En coordonnées géoréférencées (mètres / degrés), passer la valeur
+        correspondant à une demi-résolution carte (cf. smooth_geodataframe).
+
+    Retourne une nouvelle liste (les géométries vides sont éliminées).
+    """
+    out = []
+    for geom in geometries:
+        if geom is None or geom.is_empty:
+            continue
+        try:
+            simplified = geom.simplify(tolerance, preserve_topology=True)
+        except Exception:  # noqa: BLE001 — géométrie invalide : on garde l'originale
+            simplified = geom
+        if simplified is not None and not simplified.is_empty:
+            out.append(simplified)
+    return out
+
+
+def smooth_geodataframe(gdf, *, tolerance: float = 0.5):
+    """
+    Lisse toutes les géométries d'un GeoDataFrame in-place-like et retourne
+    le gdf modifié.
+
+        gdf.geometry = gdf.geometry.simplify(tolerance, preserve_topology=True)
+
+    tolerance : en unités du CRS du gdf. Pour une carte 1:50 000 reprojetée
+        en mètres, une demi-résolution pixel ≈ 6 m (1 px ≈ 12 m à 2400 px) ;
+        en EPSG:4326 (degrés) une valeur ~1e-4 lisse sans déformer.
+
+    Requiert geopandas. Sans effet (retour tel quel) si le gdf est vide.
+    """
+    _require_geopandas()
+    if gdf is None or len(gdf) == 0:
+        return gdf
+    try:
+        gdf = gdf.copy()
+        gdf["geometry"] = gdf.geometry.simplify(tolerance, preserve_topology=True)
+        # Élimine les géométries devenues vides après simplification
+        gdf = gdf[~gdf.geometry.is_empty & gdf.geometry.notna()]
+    except Exception as exc:  # noqa: BLE001
+        # On ne casse jamais l'export à cause du lissage : on log et on rend
+        # le gdf d'origine.
+        import logging
+        logging.getLogger(__name__).warning(
+            "smooth_geodataframe a échoué (%s) — géométries non lissées.", exc
+        )
+    return gdf
+
+
+# Tolérance de lissage par défaut, en unités carte.
+# Approche pragmatique : demi-pixel exprimé en mètres pour une carte 1:50 000
+# scannée puis downscalée à 2400 px (1 px ≈ 12 m → demi-pixel ≈ 6 m).
+DEFAULT_SMOOTH_TOLERANCE_M = 6.0
+# En EPSG:4326 (degrés), équivalent approximatif d'une demi-résolution.
+DEFAULT_SMOOTH_TOLERANCE_DEG = 1e-4
+
+
 def _detect_io_engine() -> str:
     """
     Choisit le backend I/O disponible pour geopandas.to_file().
@@ -448,6 +566,8 @@ def save_shapefile(gdf: gpd.GeoDataFrame, path: str | Path) -> Path:
 def masks_to_geojson(masks: dict, *,
                       transform=None,
                       georeference: bool = False,
+                      pixel_offset: tuple[float, float] = (0.0, 0.0),
+                      pixel_scale: float = 1.0,
                       min_area_px: int = 30,
                       simplify_tolerance_px: float = 1.0) -> dict:
     """
@@ -458,6 +578,11 @@ def masks_to_geojson(masks: dict, *,
     transform : matrice affine. Ignorée si georeference=False.
     georeference : False (défaut) = coordonnées GeoJSON en pixels image.
         True = applique la transform pour passer en coords monde.
+    pixel_offset : (x1, y1) — coin haut-gauche du crop, en coords downscalées.
+        Appliqué UNIQUEMENT en mode pixel (georeference=False) pour ramener
+        les vecteurs sur le plan de l'image originale non rognée.
+    pixel_scale : 1 / facteur_downscale (≥ 1). Repasse les coords en pleine
+        résolution. Combiné à pixel_offset : X_final = (X + x1) * pixel_scale.
     min_area_px : seuil sur les polygones (px²).
 
     - Pour les masques de zones (water, vegetation, buildings) : polygones.
@@ -467,6 +592,8 @@ def masks_to_geojson(masks: dict, *,
     `properties.layer` et `properties.id`. Pas de dépendance geopandas.
     """
     line_layers = {"contours", "red_roads", "roads"}
+    # En mode SIG, l'offset pixel n'a pas de sens (coords déjà en monde).
+    apply_offset = (not georeference)
     out = {}
     if not masks:
         return out
@@ -481,7 +608,6 @@ def masks_to_geojson(masks: dict, *,
                 out[name] = {"type": "FeatureCollection", "features": []}
                 continue
         except AttributeError:
-            # mask n'est pas un ndarray — on log et on saute proprement
             out[name] = {"type": "FeatureCollection", "features": []}
             continue
         is_line = name in line_layers
@@ -503,6 +629,9 @@ def masks_to_geojson(masks: dict, *,
         if not geoms:
             out[name] = {"type": "FeatureCollection", "features": []}
             continue
+        # Realignement crop+downscale -> image originale (mode pixel seulement)
+        if apply_offset:
+            geoms = apply_pixel_offset(geoms, offset=pixel_offset, scale=pixel_scale)
         try:
             features = []
             for idx, geom in enumerate(geoms):
@@ -520,14 +649,14 @@ def masks_to_geojson(masks: dict, *,
 
 
 # =====================================================================
-# Sauvegarde pixel-only — utilisée en mode georeference=False
+# Sauvegarde pixel-only -- utilisee en mode georeference=False
 # =====================================================================
 def save_geojson_pixel(geojson_dict: dict, path: str | Path) -> Path:
     """
-    Écrit un FeatureCollection (dict Python) en .geojson, sans geopandas.
+    Ecrit un FeatureCollection (dict Python) en .geojson, sans geopandas.
 
-    Conçue pour le mode pixel : pas besoin de GDAL, juste json.dump.
-    Sert aussi de filet de sécurité quand pyogrio/fiona sont cassés.
+    Concue pour le mode pixel : pas besoin de GDAL, juste json.dump.
+    Sert aussi de filet de securite quand pyogrio/fiona sont casses.
     """
     import json
     path = Path(path)

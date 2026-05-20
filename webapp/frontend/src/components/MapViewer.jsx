@@ -615,6 +615,21 @@ export default function MapViewer({
 
       </MapContainer>
 
+      {/* ── Badge mode (pixel vs SIG) ─────────────────────────────────── */}
+      <div style={{
+        position: "absolute", top: 12, right: 12, zIndex: 1100,
+        padding: "4px 10px", borderRadius: 6, fontSize: 11, fontWeight: 700,
+        fontFamily: "'JetBrains Mono', monospace",
+        background: hasGeoreference ? "rgba(39,174,96,0.92)" : "rgba(52,73,94,0.92)",
+        color: "#fff", border: "1px solid rgba(255,255,255,0.15)",
+      }}
+        title={hasGeoreference
+          ? "Mode SIG : coordonnées géoréférencées (WGS84). Export QGIS disponible."
+          : "Mode pixel : coordonnées image (CRS.Simple). Export QGIS désactivé."}
+      >
+        {hasGeoreference ? "🌍 SIG · WGS84" : "🖼️ PIXEL"}
+      </div>
+
       {/* ── Layer controls (top-left) ─────────────────────────────────── */}
       <LayerControls
         layers={layerCounts}

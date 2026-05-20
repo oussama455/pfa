@@ -40,6 +40,20 @@ def _parse_bool(value, *, default: bool = False) -> bool:
     return str(value).strip().lower() in ("true", "1", "yes", "on")
 
 
+def _epsg_from_crs(crs_str, *, default: int = 4326) -> int:
+    """
+    Extrait le code EPSG numérique d'une chaîne CRS ("EPSG:4326", "4326", ...).
+    Retourne `default` si rien d'exploitable.
+    """
+    if not crs_str:
+        return default
+    s = str(crs_str).strip().upper().replace("EPSG:", "")
+    try:
+        return int(s)
+    except (ValueError, TypeError):
+        return default
+
+
 def _feature_id(feature: dict) -> str:
     props = feature.get("properties") or {}
     value = props.get("label_id")
@@ -255,7 +269,17 @@ class MapGeoJSONView(APIView):
 
 
 class MapShapefileDownloadView(APIView):
-    """GET /api/maps/{pk}/shapefiles/ - download all layers as a ZIP."""
+    """
+    GET /api/maps/{pk}/shapefiles/ — télécharge un bundle QGIS prêt à l'emploi.
+
+    Le ZIP produit contient :
+        project.qgs            ← projet QGIS (couches pré-chargées + stylées)
+        layers/<name>.shp ...  ← shapefiles LISSÉS (anti-staircase)
+
+    Garde-fou : ce bundle n'a de sens qu'en mode SIG. Si la carte a été
+    traitée en pixel pur (has_georeference=False), QGIS ne saurait pas
+    positionner les couches → on refuse avec 409 et un message clair.
+    """
 
     def get(self, request: Request, pk: int) -> Response | FileResponse:
         upload = get_object_or_404(MapUpload, pk=pk)
@@ -269,6 +293,21 @@ class MapShapefileDownloadView(APIView):
                 status=status.HTTP_409_CONFLICT,
             )
 
+        # ── Garde-fou pixel-only ─────────────────────────────────────────────
+        if not getattr(upload, "has_georeference", False):
+            return Response(
+                {
+                    "detail": (
+                        "Export QGIS indisponible : cette carte a été traitée "
+                        "en espace pixel (sans géoréférencement). QGIS requiert "
+                        "un CRS pour positionner les couches. Relance le "
+                        "traitement en cochant « Activer le géoréférencement (SIG) »."
+                    ),
+                    "has_georeference": False,
+                },
+                status=status.HTTP_409_CONFLICT,
+            )
+
         output_dir = upload.output_dir
         geojson_files = sorted(output_dir.glob("*.geojson"))
         if not geojson_files:
@@ -277,59 +316,46 @@ class MapShapefileDownloadView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+        # ── Construit le bundle QGIS (shapefiles lissés + project.qgs) ───────
         try:
-            import geopandas as gpd
-            from pipeline.vectorization import save_shapefile
+            from pipeline.export import build_qgis_bundle
         except Exception as exc:  # noqa: BLE001
             return Response(
-                {"detail": f"Shapefile export dependencies are unavailable: {exc}"},
+                {"detail": f"Export dependencies unavailable: {exc}"},
                 status=status.HTTP_503_SERVICE_UNAVAILABLE,
             )
 
-        shapefile_dir = output_dir / "shapefiles"
-        shapefile_dir.mkdir(parents=True, exist_ok=True)
-
-        written_files: list[Path] = []
-        for geojson_file in geojson_files:
-            layer_dir = shapefile_dir / geojson_file.stem
-            layer_dir.mkdir(parents=True, exist_ok=True)
-            shp_path = layer_dir / f"{geojson_file.stem}.shp"
-            try:
-                gdf = gpd.read_file(geojson_file)
-                if gdf.empty:
-                    continue
-                save_shapefile(gdf, shp_path)
-                written_files.extend(sorted(layer_dir.glob(f"{geojson_file.stem}.*")))
-            except Exception as exc:  # noqa: BLE001
-                return Response(
-                    {
-                        "detail": (
-                            f"Failed to export layer '{geojson_file.stem}' "
-                            f"as Shapefile: {exc}"
-                        )
-                    },
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                )
-
-        if not written_files:
+        crs_epsg = _epsg_from_crs(getattr(upload, "georef_crs", None))
+        zip_path = output_dir / f"cartovec_export_{upload.pk}.zip"
+        try:
+            build_qgis_bundle(
+                output_dir,
+                zip_path,
+                crs_epsg=crs_epsg,
+                title=f"CartoVec — {upload.title}",
+                smooth=True,
+            )
+        except RuntimeError as exc:
             return Response(
-                {"detail": "No non-empty layers available for Shapefile export."},
+                {"detail": f"Aucune couche exportable : {exc}"},
                 status=status.HTTP_404_NOT_FOUND,
             )
+        except Exception as exc:  # noqa: BLE001
+            return Response(
+                {"detail": f"Échec de génération du bundle QGIS : {exc}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
-        zip_path = output_dir / f"map_{upload.pk}_shapefiles.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-            for file_path in written_files:
-                archive.write(
-                    file_path,
-                    arcname=f"{file_path.parent.name}/{file_path.name}",
-                )
-
-        return FileResponse(
+        response = FileResponse(
             open(zip_path, "rb"),
             as_attachment=True,
-            filename=f"cartovec_map_{upload.pk}_shapefiles.zip",
+            filename=f"cartovec_export_{upload.pk}.zip",
+            content_type="application/zip",
         )
+        response["Content-Disposition"] = (
+            f'attachment; filename="cartovec_export_{upload.pk}.zip"'
+        )
+        return response
 
 
 class MapCorrectionsView(APIView):

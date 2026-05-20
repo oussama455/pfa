@@ -136,7 +136,7 @@ function App() {
       const url = window.URL.createObjectURL(data);
       const link = document.createElement("a");
       link.href = url;
-      link.download = `cartovec_map_${selected.id}_shapefiles.zip`;
+      link.download = `cartovec_export_${selected.id}.zip`;
       document.body.appendChild(link);
       link.click();
       link.remove();
@@ -287,19 +287,39 @@ AMS/GSGS pour produire du WGS84/EPSG:4326."
                 </p>
               </div>
               <div className="workspace-actions">
-                <button
-                  type="button"
-                  className="download-button"
-                  onClick={handleShapefileDownload}
-                  disabled={selected.status !== "done" || downloading}
-                  title={
-                    selected.status === "done"
-                      ? "Telecharger les couches au format Shapefile"
-                      : "Le traitement doit etre termine avant l'export Shapefile"
-                  }
-                >
-                  {downloading ? "Preparation..." : "Installer les shapefiles"}
-                </button>
+                <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 4 }}>
+                  <button
+                    type="button"
+                    className="download-button"
+                    onClick={handleShapefileDownload}
+                    disabled={
+                      selected.status !== "done"
+                      || downloading
+                      || !selected.has_georeference
+                    }
+                    title={
+                      !selected.has_georeference
+                        ? "Export QGIS indisponible en mode pixel. Relance le traitement en cochant « Activer le géoréférencement (SIG) »."
+                        : selected.status === "done"
+                          ? "Télécharger le projet QGIS (.qgs) + shapefiles lissés"
+                          : "Le traitement doit être terminé avant l'export QGIS"
+                    }
+                  >
+                    {downloading ? "Préparation..." : "Exporter le projet QGIS"}
+                  </button>
+                  {selected.has_georeference ? (
+                    <small style={{ color: "#7f8c8d", fontSize: 11, maxWidth: 260, textAlign: "right" }}>
+                      🖥️ Inclut un projet <code>.qgs</code> : ouvrez le fichier
+                      extrait pour lancer directement QGIS avec vos calques
+                      stylisés et lissés.
+                    </small>
+                  ) : (
+                    <small style={{ color: "#b0883a", fontSize: 11, maxWidth: 260, textAlign: "right" }}>
+                      ⚠️ Mode pixel : export QGIS désactivé (aucun CRS). Recoche
+                      « Activer le géoréférencement (SIG) » à l'upload.
+                    </small>
+                  )}
+                </div>
                 <span className={`status ${selected.status}`}>{statusLabel(selected.status)}</span>
               </div>
             </header>

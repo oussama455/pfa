@@ -113,7 +113,8 @@ def _run_classic_pipeline(upload) -> None:
     if img is None:
         raise ValueError(f"Cannot read: {upload.raster_path}")
 
-    scale = 2400 / max(img.shape[:2])
+    # Downscale (capé à 1.0 : on ne sur-échantillonne jamais une petite carte)
+    scale = min(2400 / max(img.shape[:2]), 1.0)
     img_small = cv2.resize(img, (int(img.shape[1]*scale), int(img.shape[0]*scale)),
                             interpolation=cv2.INTER_AREA)
     bbox = detect_map_frame(img_small)
@@ -121,11 +122,23 @@ def _run_classic_pipeline(upload) -> None:
     img_crop = img_small[y1:y2, x1:x2]
     layers = extract_all_color_layers(cv2.cvtColor(img_crop, cv2.COLOR_BGR2HSV))
 
+    # Réalignement pixel : crop offset (downscalé) + remise à l'échelle vers
+    # l'image originale. En mode SIG, on garde les coords crop-space car le
+    # géoréférencement applique sa propre transformation ensuite.
+    pixel_offset = (float(x1), float(y1))
+    pixel_scale = (1.0 / scale) if scale > 0 else 1.0
+
     effective_georef = False
     try:
         from pipeline.vectorization import masks_to_geojson
         # Toujours produire d'abord en pixels — c'est l'invariant.
-        geojsons = masks_to_geojson(layers, georeference=False)
+        if georeference:
+            geojsons = masks_to_geojson(layers, georeference=False)
+        else:
+            geojsons = masks_to_geojson(
+                layers, georeference=False,
+                pixel_offset=pixel_offset, pixel_scale=pixel_scale,
+            )
 
         # Géoréférencement optionnel
         if georeference:

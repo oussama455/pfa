@@ -185,6 +185,30 @@ def run_pipeline(input_path: str | Path,
         print(f"      Cadre cartographique : {W_crop}×{H_crop} px")
         print(f"      Légende supprimée    : {remove_legend}")
 
+    # ── Réalignement pixel : calcule offset (crop) + scale (downscale) ───────
+    # En mode pixel, les masques sont en espace ROGNÉ + DOWNSCALÉ. Pour que
+    # les vecteurs retombent pile sur l'image ORIGINALE affichée par Leaflet
+    # (CRS.Simple), on applique : X_final = (X_mask + x1) * inv_scale.
+    #   - offset = coin haut-gauche du crop (coords downscalées) = crop_bbox[:2]
+    #   - inv_scale = 1 / facteur_downscale (≥ 1)
+    pixel_offset = (float(crop_bbox[0]), float(crop_bbox[1]))
+    pixel_scale = 1.0
+    try:
+        from PIL import Image
+        with Image.open(input_path) as _im:
+            _w_orig, _h_orig = _im.size
+        _ds = prep.compute_downscale_scale(_w_orig, _h_orig)
+        pixel_scale = (1.0 / _ds) if _ds > 0 else 1.0
+        if verbose:
+            print(f"      Réalignement pixel   : offset={pixel_offset}, "
+                  f"scale={pixel_scale:.4f} (orig {_w_orig}×{_h_orig})")
+    except Exception as _exc:  # noqa: BLE001
+        # Pillow absent ou image illisible : on garde scale=1 (offset seul).
+        # Correct pour les cartes non downscalées ; léger décalage sinon.
+        if verbose:
+            print(f"      Réalignement pixel   : offset={pixel_offset}, "
+                  f"scale=1.0 (dims originales indisponibles : {_exc})")
+
     # 2) Segmentation couleur
     if verbose:
         print("[2/5] Segmentation par couleur")
@@ -280,6 +304,11 @@ def run_pipeline(input_path: str | Path,
             return
         if transform is None:
             # ── Mode pixel : pas de geopandas, json direct ──────────────────
+            # Réalignement crop+downscale -> image originale AVANT export.
+            # Appliqué ICI (après _maybe_filter qui raisonne en espace crop),
+            # pour ne pas fausser le filtrage par bbox.
+            geoms = vec.apply_pixel_offset(
+                geoms, offset=pixel_offset, scale=pixel_scale)
             features = []
             for idx, g in enumerate(geoms):
                 if g is None or g.is_empty:
