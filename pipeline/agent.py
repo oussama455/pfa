@@ -58,6 +58,7 @@ USAGE:
 """
 from __future__ import annotations
 
+import gc
 import json
 import logging
 import time
@@ -114,6 +115,8 @@ class AgentState(TypedDict, total=False):
     original_image: np.ndarray          # BGR, full resolution
     preprocessed_image: np.ndarray      # BGR, downscaled + crop applied
     crop_bbox: tuple                    # (x1, y1, x2, y2) in downscaled coords
+    downscale_scale: float              # downscaled = original * scale (≤ 1)
+    original_size: tuple                # (W, H) original uncropped image
 
     # ── Vectorization ────────────────────────────────────────────────────────
     raw_masks: Dict[str, np.ndarray]    # {layer_name: binary_mask}
@@ -132,6 +135,7 @@ class AgentState(TypedDict, total=False):
     # ── Output ───────────────────────────────────────────────────────────────
     output_geojsons: Dict[str, str]     # {layer_name: file_path}
     output_shapefiles: Dict[str, str]
+    qgis_bundle: Optional[str]          # chemin du cartovec_export.zip (mode SIG)
     agent_log: List[Dict]               # structured audit trail
     error: Optional[str]
 
@@ -357,6 +361,10 @@ def node_preprocess(state: AgentState) -> Dict:
     return {
         "preprocessed_image": preprocessed,
         "crop_bbox": bbox,
+        # Métadonnées de réalignement pixel : permettent à node_export de
+        # ramener les vecteurs (espace crop+downscalé) sur l'image originale.
+        "downscale_scale": float(scale),       # downscaled = original * scale
+        "original_size": (int(w), int(h)),     # (W, H) de l'image d'origine
         "agent_log": state.get("agent_log", []) + [log_entry],
     }
 
@@ -432,10 +440,22 @@ def node_vectorize(state: AgentState) -> Dict:
     # ── Raw GeoJSON assembly ──────────────────────────────────────────────────
     raw_geojsons = _masks_to_raw_geojsons(merged_masks, bbox)
 
+    # ── Libération mémoire après traçage des contours ─────────────────────────
+    # Les masques HSV/U-Net (uint8 H×W, plusieurs couches) ne servent plus une
+    # fois les géométries extraites. On les jette explicitement ; le scoring de
+    # confiance ci-dessus les a déjà consommés. Patch identique à run_pipeline.
+    try:
+        del hsv
+    except (NameError, UnboundLocalError):
+        pass
+    del color_masks, unet_masks
+    gc.collect()
+
     log_entry.update({
         "layers_produced": list(merged_masks.keys()),
         "confidence_score": round(confidence_score, 4),
         "elapsed_s": round(time.perf_counter() - t0, 3),
+        "memory_gc": "del color/unet masks + gc.collect()",
     })
     logger.info("[vectorize] confidence=%.3f  layers=%s",
                 confidence_score, list(merged_masks.keys()))
@@ -499,8 +519,14 @@ def _compute_confidence(masks: Dict[str, np.ndarray],
 
 
 def _masks_to_raw_geojsons(masks: Dict[str, np.ndarray],
-                             bbox: Optional[tuple]) -> List[Dict]:
-    """Converts binary masks to list of GeoJSON FeatureCollection dicts."""
+                           bbox: Optional[tuple]) -> List[Dict]:
+    """
+    Converts binary masks to list of GeoJSON FeatureCollection dicts.
+
+    The masks are already in cropped-image coordinates. ``bbox`` is kept for
+    API compatibility with older calls, but must not be used directly as a
+    global-image filter here; pixel realignment happens later in node_export.
+    """
     results = []
     for name, mask in masks.items():
         try:
@@ -520,10 +546,15 @@ def _masks_to_raw_geojsons(masks: Dict[str, np.ndarray],
             else:
                 geoms = mask_to_polygons(mask, min_area_px=30)
 
-            # Filter to bbox
-            if bbox and geoms:
+            # Filter in local crop coordinates. The old code used ``bbox``
+            # directly even though it is expressed in the downscaled full image,
+            # which could discard valid features before export realigned them.
+            if geoms:
                 from pipeline.vectorization import filter_features_by_bbox
-                geoms = filter_features_by_bbox(geoms, bbox, margin=20, mode="centroid")
+                h, w = mask.shape[:2]
+                geoms = filter_features_by_bbox(
+                    geoms, (0, 0, w, h), margin=20, mode="centroid"
+                )
 
             features = [
                 {
@@ -758,8 +789,14 @@ def node_georef(state: AgentState) -> Dict:
             "agent_log": state.get("agent_log", []) + [log_entry],
         }
 
-    except ImportError as exc:
-        log_entry["georef_status"] = f"skipped (georeferencing module unavailable): {exc}"
+    except (ImportError, OSError, RuntimeError) as exc:
+        # Graceful degrade : GDAL/rasterio cassé, DLL manquante, ou erreur de
+        # transformation → on NE crash PAS le graphe. On log un warning de
+        # priorité haute et on retombe sur les coords pixel (raw_geojsons
+        # inchangés). L'export produira alors un GeoJSON pixel.
+        logger.warning("[georef] dégradation gracieuse vers le mode pixel : %s", exc)
+        log_entry["georef_status"] = f"degraded_to_pixel ({type(exc).__name__}: {exc})"
+        log_entry["georef_fallback"] = True
         return {
             "georef_crs": None,
             "agent_log": state.get("agent_log", []) + [log_entry],
@@ -770,9 +807,47 @@ def node_georef(state: AgentState) -> Dict:
 # Node 6 — Export
 # ─────────────────────────────────────────────────────────────────────────────
 
+def _offset_geojson_dict(gj: Dict, offset, scale) -> Dict:
+    """
+    Applique le réalignement pixel (offset crop + remise à l'échelle) à un
+    FeatureCollection dict, via shapely shape/mapping + apply_pixel_offset.
+
+        X_final = (X_mask + offset_x) * scale
+
+    Robuste : retourne le dict inchangé si shapely ou la transform échoue.
+    """
+    try:
+        from shapely.geometry import shape, mapping
+        from pipeline.vectorization import apply_pixel_offset
+    except Exception:  # noqa: BLE001
+        return gj
+
+    feats_out = []
+    for feat in gj.get("features", []):
+        geom = feat.get("geometry")
+        if not geom:
+            continue
+        try:
+            shp = shape(geom)
+            moved = apply_pixel_offset([shp], offset=offset, scale=scale)
+            if not moved:
+                continue
+            feat = {**feat, "geometry": mapping(moved[0])}
+        except Exception:  # noqa: BLE001
+            pass  # garde la géométrie d'origine en cas de souci
+        feats_out.append(feat)
+    return {**gj, "features": feats_out}
+
+
 def node_export(state: AgentState) -> Dict:
     """
     EXPORT node — writes GeoJSON files and the agent audit log to disk.
+
+    Parité avec run_pipeline :
+      - Mode pixel (georeference=False ou georef dégradé) : réaligne les
+        coordonnées vers l'image ORIGINALE non rognée (offset crop + 1/scale).
+      - Mode SIG (georef réussi, georef_crs renseigné) : génère en plus le
+        bundle QGIS cartovec_export.zip (project.qgs + layers/ relatifs).
     """
     import json as json_module
     log_entry = {"node": "export", "ts": time.time()}
@@ -780,9 +855,21 @@ def node_export(state: AgentState) -> Dict:
     output_dir = Path(state.get("output_dir", "data/processed/agent_output"))
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    # Le georef a-t-il réellement abouti ? (sinon on est en pixel)
+    is_gis = bool(state.get("georef_crs"))
+
+    # Paramètres de réalignement pixel
+    crop_bbox = state.get("crop_bbox") or (0, 0, 0, 0)
+    ds_scale = state.get("downscale_scale", 1.0) or 1.0
+    pixel_offset = (float(crop_bbox[0]), float(crop_bbox[1]))
+    pixel_scale = (1.0 / ds_scale) if ds_scale > 0 else 1.0
+
     output_geojsons: Dict[str, str] = {}
     for gj in state.get("raw_geojsons", []):
         name = gj.get("name", f"layer_{len(output_geojsons)}")
+        # En mode pixel uniquement : réaligner vers l'image originale.
+        if not is_gis:
+            gj = _offset_geojson_dict(gj, pixel_offset, pixel_scale)
         path = output_dir / f"{name}.geojson"
         with open(path, "w", encoding="utf-8") as f:
             json_module.dump(gj, f, indent=2)
@@ -796,10 +883,35 @@ def node_export(state: AgentState) -> Dict:
     log_entry.update({
         "output_files": list(output_geojsons.keys()),
         "output_dir": str(output_dir),
+        "mode": "gis" if is_gis else "pixel",
+        "pixel_offset": pixel_offset if not is_gis else None,
+        "pixel_scale": round(pixel_scale, 4) if not is_gis else None,
     })
+
+    # ── Bundle QGIS — uniquement en mode SIG réussi ──────────────────────────
+    qgis_bundle = None
+    if is_gis:
+        try:
+            from pipeline.export import build_qgis_bundle
+            crs_epsg = 4326
+            crs_str = state.get("georef_crs") or ""
+            if "EPSG:" in str(crs_str):
+                try:
+                    crs_epsg = int(str(crs_str).upper().replace("EPSG:", "").strip())
+                except (ValueError, TypeError):
+                    crs_epsg = 4326
+            zip_path = output_dir / "cartovec_export.zip"
+            build_qgis_bundle(output_dir, zip_path, crs_epsg=crs_epsg,
+                              title="CartoVec — Agent Export", smooth=True)
+            qgis_bundle = str(zip_path)
+            log_entry["qgis_bundle"] = qgis_bundle
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[export] bundle QGIS non généré : %s", exc)
+            log_entry["qgis_bundle_error"] = str(exc)
 
     return {
         "output_geojsons": output_geojsons,
+        "qgis_bundle": qgis_bundle,
         "agent_log": state.get("agent_log", []) + [log_entry],
     }
 
@@ -828,26 +940,39 @@ def route_by_map_type(state: AgentState) -> str:
     return "preprocess"
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # Graph assembly
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 
-def build_agent():
+def build_agent(*, checkpointer=None, with_memory: bool = False):
     """
-    Assembles and compiles the LangGraph StateGraph.
+    Assemble et compile le StateGraph LangGraph.
 
-    Returns a compiled graph (callable like a function).
-    Raises ImportError with instructions if langgraph is not installed.
+    Arguments
+    ---------
+    checkpointer : checkpointer LangGraph explicite (ex. MemorySaver()).
+        Permet le streaming avec mémoire de session isolée par thread_id.
+    with_memory : si True et checkpointer=None, instancie un MemorySaver
+        automatiquement (mémoire en RAM, suffisante pour le streaming live).
+
+    Retourne un graphe compilé (appelable). Lève ImportError si langgraph
+    n'est pas installé.
     """
     if not LANGGRAPH_AVAILABLE:
         raise ImportError(
-            "langgraph is required for the agent.\n"
-            "Install: pip install langgraph langchain-core"
+            "langgraph est requis pour l'agent.\n"
+            "Installe : pip install langgraph langchain-core"
         )
+
+    if checkpointer is None and with_memory:
+        try:
+            from langgraph.checkpoint.memory import MemorySaver
+            checkpointer = MemorySaver()
+        except ImportError:
+            checkpointer = None  # version langgraph sans checkpoint — on continue
 
     graph = StateGraph(AgentState)
 
-    # Register nodes
     graph.add_node("perceive",      node_perceive)
     graph.add_node("preprocess",    node_preprocess)
     graph.add_node("vectorize",     node_vectorize)
@@ -856,26 +981,28 @@ def build_agent():
     graph.add_node("georef",        node_georef)
     graph.add_node("export",        node_export)
 
-    # Edges
     graph.add_edge(START, "perceive")
-    graph.add_conditional_edges("perceive", route_by_map_type, {"preprocess": "preprocess"})
-    graph.add_edge("preprocess",   "vectorize")
-    graph.add_edge("vectorize",    "qa_check")
+    graph.add_conditional_edges("perceive", route_by_map_type,
+                                {"preprocess": "preprocess"})
+    graph.add_edge("preprocess", "vectorize")
+    graph.add_edge("vectorize",  "qa_check")
     graph.add_conditional_edges(
         "qa_check",
         route_by_qa,
         {"georef": "georef", "self_correct": "self_correct"},
     )
-    graph.add_edge("self_correct",  "vectorize")   # retry loop
-    graph.add_edge("georef",        "export")
-    graph.add_edge("export",        END)
+    graph.add_edge("self_correct", "vectorize")   # retry loop
+    graph.add_edge("georef",       "export")
+    graph.add_edge("export",       END)
 
+    if checkpointer is not None:
+        return graph.compile(checkpointer=checkpointer)
     return graph.compile()
 
 
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 # Public entry point
-# ─────────────────────────────────────────────────────────────────────────────
+# =============================================================================
 
 def run_agent(
     raster_path: str,
@@ -887,21 +1014,20 @@ def run_agent(
     georeference: bool = False,
 ) -> AgentState:
     """
-    High-level entry point: run the full agent on a raster map.
+    Point d'entree haut niveau : execute l'agent complet sur une carte raster.
 
     Args:
-        raster_path:   Path to the input raster (PNG / TIFF / WEBP / JPG).
-        output_dir:    Directory where GeoJSON outputs will be written.
-        map_name:      Sheet name for auto GCP lookup (e.g. "tunis", "ain_bessem").
-        weights_path:  Path to U-Net .pth weights (optional; HSV used as fallback).
-        device:        "cuda" / "cpu" / None (auto-detect).
-        georeference:  False (default) = pixel-space output. True = enable the
-                       georef node, which applies the AMS sheet-corners transform
-                       to produce WGS84 coordinates. Requires georeferencing.py
-                       and rasterio.
+        raster_path:   chemin du raster d'entree (PNG / TIFF / JPG).
+        output_dir:    dossier de sortie pour les GeoJSON.
+        map_name:      nom de feuille pour lookup GCP auto (ex. "tunis").
+        weights_path:  chemin .pth U-Net (optionnel ; HSV en fallback).
+        device:        "cuda" / "cpu" / None (auto).
+        georeference:  False (defaut) = sortie en espace pixel. True = active
+                       le noeud georef (transformation AMS -> WGS84). En cas
+                       d'echec GDAL, degradation gracieuse vers le mode pixel.
 
     Returns:
-        Final AgentState dict containing output_geojsons, agent_log, etc.
+        AgentState final (output_geojsons, qgis_bundle, agent_log, ...).
     """
     agent = build_agent()
 
@@ -916,10 +1042,10 @@ def run_agent(
         "agent_log":     [],
     }
 
-    logger.info("[agent] Starting — raster=%s  map_name=%s  georef=%s",
+    logger.info("[agent] Starting -- raster=%s  map_name=%s  georef=%s",
                 raster_path, map_name, georeference)
     result = agent.invoke(initial_state)
-    logger.info("[agent] Done — outputs=%s  qa_passed=%s  score=%.3f",
+    logger.info("[agent] Done -- outputs=%s  qa_passed=%s  score=%.3f",
                 list(result.get("output_geojsons", {}).keys()),
                 result.get("qa_passed"),
                 result.get("confidence_score", 0.0))

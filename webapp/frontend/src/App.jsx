@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import axios from "axios";
 import MapViewer from "./components/MapViewer.jsx";
+import AgentChat from "./components/AgentChat.jsx";
 import TrainingPanel from "./components/TrainingPanel.jsx";
 import WeightsSelector from "./components/WeightsSelector.jsx";
 
@@ -44,6 +45,13 @@ function App() {
   });
   const [showTraining, setShowTraining] = useState(false);
 
+  // ── État partagé Agent ↔ Carte ─────────────────────────────────────────────
+  // Quand l'agent termine (paquet agent_response avec geojson_url valide),
+  // AgentChat remonte l'URL ici via onGeoJsonReady. On s'en sert comme jeton de
+  // rechargement : MapViewer ré-interroge /maps/{id}/geojson/ et affiche les
+  // vecteurs fraîchement produits, sans rechargement manuel.
+  const [activeGeoJsonUrl, setActiveGeoJsonUrl] = useState(null);
+
   const selected = useMemo(
     () => selectedMap || maps.find((item) => item.id === selectedId),
     [maps, selectedId, selectedMap],
@@ -83,6 +91,8 @@ function App() {
 
   useEffect(() => {
     fetchSelected(selectedId);
+    // Carte changée => on oublie les vecteurs de l'agent précédent.
+    setActiveGeoJsonUrl(null);
   }, [fetchSelected, selectedId]);
 
   useEffect(() => {
@@ -328,15 +338,30 @@ AMS/GSGS pour produire du WGS84/EPSG:4326."
               <pre className="error-box wide">{selected.error_message}</pre>
             )}
 
-            <section className="viewer-panel">
-              <MapViewer
-                mapId={selected.id}
-                rasterUrl={selected.original_image_url || selected.raster_url}
-                rasterBounds={defaultBounds(selected)}
-                rasterSize={selected.raster_size || null}
-                hasGeoreference={!!selected.has_georeference}
-                apiBaseUrl={API_BASE}
-              />
+            {/* Espace de travail en deux colonnes :
+                gauche = agent IA live (chat / suivi SSE),
+                droite = carte WebGIS (Leaflet). Les deux sont des composants
+                frères ; ils partagent l'URL GeoJSON via l'état du parent. */}
+            <section className="viewer-panel" style={styles.workArea}>
+              <div style={styles.agentColumn}>
+                <AgentChat
+                  mapId={selected.id}
+                  georeference={!!selected.has_georeference}
+                  apiBase={API_BASE}
+                  onGeoJsonReady={(url) => setActiveGeoJsonUrl(url)}
+                />
+              </div>
+              <div style={styles.mapColumn}>
+                <MapViewer
+                  mapId={selected.id}
+                  rasterUrl={selected.original_image_url || selected.raster_url}
+                  rasterBounds={defaultBounds(selected)}
+                  rasterSize={selected.raster_size || null}
+                  hasGeoreference={!!selected.has_georeference}
+                  apiBaseUrl={API_BASE}
+                  reloadToken={activeGeoJsonUrl}
+                />
+              </div>
             </section>
           </>
         )}
@@ -344,5 +369,34 @@ AMS/GSGS pour produire du WGS84/EPSG:4326."
     </div>
   );
 }
+
+const styles = {
+  // Conteneur deux colonnes. Sur écran étroit (flex-wrap), l'agent passe
+  // au-dessus de la carte ; sinon il occupe une colonne fixe à gauche.
+  workArea: {
+    display: "flex",
+    gap: 16,
+    alignItems: "stretch",
+    flexWrap: "wrap",
+  },
+  agentColumn: {
+    flex: "1 1 360px",
+    minWidth: 320,
+    maxWidth: 460,
+    background: "#11161f",
+    border: "1px solid rgba(255,255,255,0.07)",
+    borderRadius: 10,
+    overflow: "hidden",
+    display: "flex",
+    flexDirection: "column",
+  },
+  mapColumn: {
+    flex: "2 1 520px",
+    minWidth: 360,
+    minHeight: 560,
+    borderRadius: 10,
+    overflow: "hidden",
+  },
+};
 
 export default App;

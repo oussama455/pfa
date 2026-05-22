@@ -263,7 +263,7 @@ class MapGeoJSONView(APIView):
         return Response({
             "map_id":  upload.pk,
             "title":   upload.title,
-            "crs":     "EPSG:4326",
+            "crs":     upload.georef_crs if upload.has_georeference else None,
             "layers":  layers,
         })
 

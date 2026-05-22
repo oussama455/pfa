@@ -375,6 +375,7 @@ export default function MapViewer({
   hasGeoreference = false,     // false (défaut) = mode pixel, true = mode SIG
   apiBaseUrl = "/api",
   geojsonLayers: geojsonLayersProp = null,
+  reloadToken = null,          // change de valeur => force un re-fetch des couches
   mapSeries = "ams_tunisia",
   isAdmin = false,
 }) {
@@ -433,7 +434,7 @@ export default function MapViewer({
         setFetchError(err.message);
         setLoading(false);
       });
-  }, [mapId, apiBaseUrl, geojsonLayersProp]);
+  }, [mapId, apiBaseUrl, geojsonLayersProp, reloadToken]);
 
   // ── Layer counts for controls ──────────────────────────────────────────────
   const layerCounts = useMemo(() =>

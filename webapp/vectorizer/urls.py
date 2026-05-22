@@ -3,6 +3,7 @@ webapp/vectorizer/urls.py — URL routing V2 (with Active Learning endpoints).
 """
 from django.urls import path
 from . import views
+from .api_agent import agent_stream_view
 from .api import (
     MapListCreateView,
     MapDetailView,
@@ -23,6 +24,7 @@ from .api_training import (
     TrainingJobLogView,
     TrainingJobDownloadView,
 )
+from .api_agent import agent_stream_view
 
 app_name = 'vectorizer'
 
@@ -40,6 +42,10 @@ urlpatterns = [
     path('api/maps/<int:pk>/shapefiles/',   MapShapefileDownloadView.as_view(), name='api-map-shapefiles'),
     path('api/maps/<int:pk>/corrections/',  MapCorrectionsV2View.as_view(),name='api-corrections'),
 
+    # ── REST API — Agent LangGraph en streaming (SSE) ─────────────────────
+    # Avant : path('api/agent/stream/', AgentStreamView.as_view(), name='api-agent-stream'),
+    path('api/agent/stream/', agent_stream_view, name='api-agent-stream'),
+    
     # ── REST API — Active Learning Calibration ────────────────────────────
     path('api/calibration/history/',              CalibrationHistoryView.as_view(), name='api-calib-history'),
     path('api/calibration/<str:series>/',         CalibrationStatusView.as_view(),  name='api-calibration'),
