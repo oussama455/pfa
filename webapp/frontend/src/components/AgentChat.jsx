@@ -4,41 +4,22 @@
  * « Agent IA Live » — tableau de bord d'exécution du pipeline LangGraph.
  *
  * Se connecte à l'endpoint SSE /api/agent/stream/?map_id=...&georeference=...
- * et restitue le déroulé en direct sous une forme « chat / dashboard » :
- *
- *   ┌──────────────────────────────────────────────┐
- *   │ 🤖 Agent IA Live — Suivi CartoVec   ● En direct│  ← en-tête
- *   ├──────────────────────────────────────────────┤
- *   │ [Prétraitement] ➔ [Segmentation] ➔ [Vecto…]   │  ← stepper de nœud actif
- *   ├──────────────────────────────────────────────┤
- *   │   bulle utilisateur (droite)                   │
- *   │ bulle agent (gauche, markdown léger)           │  ← fil de discussion auto-scroll
- *   │ ┌── System Event (terminal vert sur ardoise)─┐ │
- *   │ │ → Executing: preprocess                     │ │  ← logs SSE en flux
- *   │ │ [preprocess] Recadrage offset (10, 20)…     │ │
- *   │ └─────────────────────────────────────────────┘ │
- *   │ ⚡ Charger les vecteurs sur la carte            │  ← action injectée au succès
- *   └──────────────────────────────────────────────┘
- *
- * Notre agent n'est pas un LLM conversationnel : le « prompt » = lancer le
- * traitement d'une carte déjà téléversée (map_id), avec ou sans SIG.
+ * et restitue le déroulé en direct sous une forme « chat / dashboard» :
+ *   en-tête + stepper de nœud + fil de discussion auto-scroll + terminal
+ *   « System Event » (vert sur ardoise) + action « charger les vecteurs ».
  *
  * Props :
  *   mapId          {number}   PK de la carte à traiter (déclenche la connexion).
  *   georeference   {boolean}  Mode SIG (true) ou pixel (false, défaut).
  *   apiBase        {string}   Base de l'API REST (défaut import.meta.env).
  *   onGeoJsonReady {func}     Callback(url) appelé quand l'agent renvoie une
- *                             couche GeoJSON valide. Sert à remonter l'URL vers
- *                             App.jsx (état activeGeoJsonUrl) pour que MapViewer
- *                             recharge automatiquement les vecteurs.
+ *                             couche GeoJSON valide (remonte vers App.jsx).
  */
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
 const API_BASE = import.meta.env.VITE_API_BASE_URL || "/api";
 
-// ── Stepper : 3 phases macro affichées, chacune adossée aux nœuds réels ──────
-// Le backend émet des node_start pour perceive/preprocess/vectorize/qa_check/
-// self_correct/georef/export. On les regroupe en trois étapes lisibles.
+// Stepper : 3 phases macro affichées, chacune adossée aux nœuds réels.
 const NODE_PHASES = [
   { id: "pre", label: "Prétraitement",          nodes: ["perceive", "preprocess"] },
   { id: "seg", label: "Segmentation Sémantique", nodes: ["vectorize"] },
@@ -56,9 +37,7 @@ function makeThreadId() {
   return `sess-${Math.random().toString(36).slice(2, 12)}`;
 }
 
-// ── Rendu markdown minimal (pas de dépendance) ───────────────────────────────
-// Gère **gras**, `code` et les retours à la ligne. Construit des nœuds React
-// (pas de dangerouslySetInnerHTML : sûr vis-à-vis du contenu agent).
+// Rendu markdown minimal (pas de dépendance) : **gras**, `code`, retours ligne.
 function renderInline(text, keyPrefix) {
   const out = [];
   const regex = /(\*\*[^*]+\*\*|`[^`]+`)/g;
@@ -87,7 +66,7 @@ function renderMarkdown(text) {
     .split("\n")
     .map((line, idx) => (
       <span key={idx} style={{ display: "block" }}>
-        {renderInline(line, idx) }
+        {renderInline(line, idx)}
       </span>
     ));
 }
@@ -101,10 +80,10 @@ export default function AgentChat({
   const [connState, setConnState] = useState("idle"); // idle|connecting|open|done|error
   const [activeNode, setActiveNode] = useState(null);
   const [maxPhaseReached, setMaxPhaseReached] = useState(-1);
-  const [messages, setMessages] = useState([]);      // bulles chat {id, role, text}
-  const [terminal, setTerminal] = useState([]);      // lignes terminal {id, level, text}
-  const [finalMsg, setFinalMsg] = useState(null);    // paquet agent_response
-  const [runId, setRunId] = useState(0);             // bump => relance
+  const [messages, setMessages] = useState([]);
+  const [terminal, setTerminal] = useState([]);
+  const [finalMsg, setFinalMsg] = useState(null);
+  const [runId, setRunId] = useState(0);
 
   const esRef = useRef(null);
   const threadRef = useRef(makeThreadId());
@@ -113,7 +92,6 @@ export default function AgentChat({
   const scrollRef = useRef(null);
   const termRef = useRef(null);
 
-  // ── Helpers d'ajout (id stable, pas de collision de clés) ──────────────────
   const pushTerminal = useCallback((text, level = "log") => {
     lineSeq.current += 1;
     setTerminal((prev) => [...prev, { id: lineSeq.current, level, text }]);
@@ -132,7 +110,6 @@ export default function AgentChat({
     setFinalMsg(null);
   }, []);
 
-  // ── Auto-scroll : on colle le fil et le terminal au bas à chaque update ────
   useEffect(() => {
     if (scrollRef.current) scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
   }, [messages, finalMsg, connState]);
@@ -141,14 +118,12 @@ export default function AgentChat({
     if (termRef.current) termRef.current.scrollTop = termRef.current.scrollHeight;
   }, [terminal]);
 
-  // ── Connexion SSE ──────────────────────────────────────────────────────────
   useEffect(() => {
     if (!mapId) return undefined;
 
     resetState();
     setConnState("connecting");
 
-    // Bulle « utilisateur » : le prompt = lancer le traitement de la carte.
     msgSeq.current += 1;
     const launchMsg = {
       id: msgSeq.current,
@@ -204,7 +179,6 @@ export default function AgentChat({
             "ok",
           );
           if (pkt.text) pushMessage("agent", pkt.text);
-          // Part 2 : remonter l'URL vers App pour auto-charger la carte.
           if (pkt.geojson_url && typeof onGeoJsonReady === "function") {
             onGeoJsonReady(pkt.geojson_url);
           }
@@ -228,8 +202,6 @@ export default function AgentChat({
       }
     };
 
-    // Coupure réseau. Si le run n'est pas terminé proprement, on signale
-    // [CONNECTION LOST] dans le terminal sans figer l'UI.
     es.onerror = () => {
       if (es.readyState === EventSource.CLOSED) {
         if (!closedCleanly) {
@@ -238,7 +210,6 @@ export default function AgentChat({
         }
         return;
       }
-      // Sinon EventSource retente seul : on l'indique sans bloquer.
       pushTerminal("… reconnexion en cours (coupure transitoire).", "sys");
       setConnState("connecting");
     };
@@ -250,7 +221,7 @@ export default function AgentChat({
   }, [mapId, georeference, apiBase, runId, resetState, pushTerminal, pushMessage, onGeoJsonReady]);
 
   const handleRetry = useCallback(() => {
-    threadRef.current = makeThreadId(); // nouvelle session isolée
+    threadRef.current = makeThreadId();
     setRunId((n) => n + 1);
   }, []);
 
@@ -275,7 +246,6 @@ export default function AgentChat({
     <div style={styles.wrap}>
       <Header connState={connState} />
 
-      {/* ── Stepper de nœud actif (3 phases) ───────────────────────────── */}
       <div style={styles.stepper}>
         {NODE_PHASES.map((phase, idx) => {
           const isActive = idx === activePhase;
@@ -303,15 +273,11 @@ export default function AgentChat({
         })}
       </div>
 
-      {/* ── Fil de discussion auto-scroll ──────────────────────────────── */}
       <div ref={scrollRef} style={styles.feed}>
         {messages.map((msg) => (
           <Bubble key={msg.id} role={msg.role} text={msg.text} />
         ))}
 
-        {/* ── Terminal « System Event » ─────────────────────────────────
-            Classes Tailwind demandées rendues en styles inline :
-            bg-slate-900 text-green-400 font-mono text-xs p-3 rounded shadow-inner */}
         {terminal.length > 0 && (
           <div style={styles.terminalShell}>
             <div style={styles.terminalLabel}>System Event</div>
@@ -330,7 +296,6 @@ export default function AgentChat({
           </div>
         )}
 
-        {/* ── Action de succès : charger les vecteurs ──────────────────── */}
         {finalMsg && finalMsg.geojson_url && (
           <div style={styles.actionRow}>
             <button type="button" style={styles.loadBtn} onClick={handleLoadVectors}>
@@ -344,7 +309,6 @@ export default function AgentChat({
           </div>
         )}
 
-        {/* ── Erreur : bouton réessayer ────────────────────────────────── */}
         {connState === "error" && (
           <div style={styles.actionRow}>
             <button type="button" style={styles.retryBtn} onClick={handleRetry}>
@@ -356,8 +320,6 @@ export default function AgentChat({
     </div>
   );
 }
-
-// ── Sous-composants ──────────────────────────────────────────────────────────
 
 function Header({ connState }) {
   const badge = connBadge(connState);
@@ -384,7 +346,6 @@ function Bubble({ role, text }) {
       </div>
     );
   }
-  // agent : markdown léger, aligné à gauche
   return (
     <div style={styles.bubbleRowLeft}>
       <div style={{ ...styles.bubble, ...styles.bubbleAgent }}>{renderMarkdown(text)}</div>
@@ -404,15 +365,14 @@ function connBadge(state) {
 
 function termColor(level) {
   switch (level) {
-    case "err":  return "#f87171"; // rouge clair
-    case "ok":   return "#4ade80"; // vert (succès)
-    case "node": return "#38bdf8"; // cyan (nœud)
-    case "sys":  return "#a3a3a3"; // gris (système)
-    default:     return "#4ade80"; // text-green-400 (log)
+    case "err":  return "#f87171";
+    case "ok":   return "#4ade80";
+    case "node": return "#38bdf8";
+    case "sys":  return "#a3a3a3";
+    default:     return "#4ade80";
   }
 }
 
-// ── Styles inline (le projet n'utilise PAS Tailwind) ─────────────────────────
 const styles = {
   wrap: {
     display: "flex", flexDirection: "column", height: "100%", minHeight: 560,
@@ -430,7 +390,6 @@ const styles = {
     color: "#fff", whiteSpace: "nowrap",
   },
   empty: { padding: 24, color: "#64748b", textAlign: "center", fontSize: 13 },
-
   stepper: {
     display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap",
     padding: "10px 14px", borderBottom: "1px solid rgba(255,255,255,0.06)",
@@ -440,7 +399,6 @@ const styles = {
     transition: "all 0.2s", whiteSpace: "nowrap",
   },
   arrow: { color: "#475569", fontSize: 13 },
-
   feed: {
     flex: 1, overflowY: "auto", padding: 14, display: "flex",
     flexDirection: "column", gap: 10,
@@ -451,9 +409,7 @@ const styles = {
     maxWidth: "85%", padding: "8px 12px", borderRadius: 12, fontSize: 13,
     lineHeight: 1.45, wordBreak: "break-word",
   },
-  bubbleUser: {
-    background: "#2563eb", color: "#fff", borderBottomRightRadius: 3,
-  },
+  bubbleUser: { background: "#2563eb", color: "#fff", borderBottomRightRadius: 3 },
   bubbleAgent: {
     background: "#1e293b", color: "#e2e8f0", borderBottomLeftRadius: 3,
     border: "1px solid rgba(255,255,255,0.06)",
@@ -466,10 +422,6 @@ const styles = {
     background: "rgba(148,163,184,0.18)", padding: "1px 5px", borderRadius: 4,
     fontFamily: "ui-monospace, 'JetBrains Mono', monospace", fontSize: 12,
   },
-
-  // Terminal « System Event » :
-  // bg-slate-900 #0f172a / text-green-400 #4ade80 / font-mono / text-xs 12px
-  // p-3 12px / rounded 6px / shadow-inner (boxShadow inset)
   terminalShell: { display: "flex", flexDirection: "column", gap: 4 },
   terminalLabel: {
     fontSize: 10, fontWeight: 700, letterSpacing: 1, textTransform: "uppercase",
@@ -485,7 +437,6 @@ const styles = {
   },
   termLine: { padding: "1px 0", whiteSpace: "pre-wrap", lineHeight: 1.5 },
   caret: { opacity: 0.7 },
-
   actionRow: { display: "flex", gap: 8, flexWrap: "wrap", marginTop: 2 },
   loadBtn: {
     padding: "9px 16px", background: "#f59e0b", color: "#0b1120", border: "none",

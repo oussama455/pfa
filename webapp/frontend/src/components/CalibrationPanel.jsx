@@ -27,7 +27,7 @@
  *   />
  */
 
-import React, { useState, useEffect, useCallback } from "react";
+import React, { useState, useEffect, useCallback, useRef } from "react";
 import axios from "axios";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -96,6 +96,32 @@ const barStyles = {
     width: 54, fontSize: 9, color: "#bdc3c7",
     fontFamily: "monospace", textAlign: "right",
   },
+};
+
+// Bannière transitoire « évolution » après recalibration.
+const evoStyles = {
+  box: {
+    background: "rgba(39,174,96,0.10)",
+    border: "1px solid rgba(39,174,96,0.4)",
+    borderRadius: 6, padding: "8px 10px", marginBottom: 10,
+  },
+  head: {
+    fontSize: 10, fontWeight: 700, color: "#2ecc71",
+    letterSpacing: 0.5, marginBottom: 6, textTransform: "uppercase",
+  },
+  layerBlock: { marginBottom: 6 },
+  layerName: {
+    fontSize: 10, fontWeight: 700, color: "#f39c12",
+    textTransform: "uppercase", letterSpacing: 0.3,
+  },
+  line: {
+    display: "flex", alignItems: "center", gap: 6,
+    fontFamily: "monospace", fontSize: 11, marginTop: 2,
+  },
+  ch: { width: 12, color: "#95a5a6", fontWeight: 700 },
+  before: { color: "#7f8c8d" },
+  arrow: { color: "#bdc3c7" },
+  after: { fontWeight: 700 },
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -258,6 +284,7 @@ export default function CalibrationPanel({
   mapId,
   apiBaseUrl = "/api",
   correctionCount = 0,
+  liveUpdates = [],          // calibration_updates renvoyés par la dernière correction
   isAdmin = false,
 }) {
   const [calibStatus, setCalibStatus]   = useState(null);
@@ -267,6 +294,10 @@ export default function CalibrationPanel({
   const [tab, setTab]                   = useState("ranges");   // "ranges" | "history"
   const [resetting, setResetting]       = useState(false);
   const [collapsed, setCollapsed]       = useState(false);
+  const [evolution, setEvolution]       = useState([]);         // [{layer, channels:[{ch,before,after,changed}]}]
+
+  // Plages connues juste AVANT la dernière mise à jour, pour calculer old ➔ new.
+  const prevRangesRef = useRef({});
 
   // ── Fetch calibration status ──────────────────────────────────────────────
   const fetchStatus = useCallback(async () => {
@@ -298,6 +329,43 @@ export default function CalibrationPanel({
     const interval = setInterval(fetchStatus, 10_000);
     return () => clearInterval(interval);
   }, [fetchStatus, correctionCount]);
+
+  // Amorce les plages « avant » à partir du 1ᵉʳ statut serveur (sans écraser les
+  // snapshots déjà gérés par les recalibrations successives).
+  useEffect(() => {
+    if (!calibStatus?.layers) return;
+    Object.entries(calibStatus.layers).forEach(([name, d]) => {
+      if (!(name in prevRangesRef.current)) {
+        prevRangesRef.current[name] = { H: d.H, S: d.S, V: d.V };
+      }
+    });
+  }, [calibStatus]);
+
+  // Diff old ➔ new à chaque recalibration (liveUpdates) → bannière d'évolution.
+  useEffect(() => {
+    if (!liveUpdates || liveUpdates.length === 0) return undefined;
+
+    const evo = liveUpdates.map((u) => {
+      const before = prevRangesRef.current[u.layer];
+      const after = u.new_range || {};
+      const channels = ["H", "S", "V"].map((ch) => {
+        const b = before?.[ch];
+        const a = after?.[ch];
+        const changed = !b || !a || b[0] !== a[0] || b[1] !== a[1];
+        return { ch, before: b, after: a, changed };
+      });
+      return { layer: u.layer, channels };
+    });
+    setEvolution(evo);
+
+    // La sortie de cette recalibration devient le « avant » de la suivante.
+    liveUpdates.forEach((u) => {
+      if (u.new_range) prevRangesRef.current[u.layer] = u.new_range;
+    });
+
+    const t = setTimeout(() => setEvolution([]), 15_000);
+    return () => clearTimeout(t);
+  }, [liveUpdates]);
 
   // ── Reset calibration ──────────────────────────────────────────────────────
   const handleReset = async () => {
@@ -346,6 +414,35 @@ export default function CalibrationPanel({
 
           {loading && <div style={panelStyles.loading}>Loading calibration data…</div>}
           {error   && <div style={panelStyles.error}>{error}</div>}
+
+          {/* ── Évolution de la charte après recalibration (old ➔ new) ───── */}
+          {evolution.length > 0 && (
+            <div style={evoStyles.box}>
+              <div style={evoStyles.head}>
+                ⚡ Recalibration appliquée
+              </div>
+              {evolution.map((e) => (
+                <div key={e.layer} style={evoStyles.layerBlock}>
+                  <span style={evoStyles.layerName}>{e.layer}</span>
+                  {e.channels.map((c) => (
+                    <div
+                      key={c.ch}
+                      style={{ ...evoStyles.line, opacity: c.changed ? 1 : 0.5 }}
+                    >
+                      <span style={evoStyles.ch}>{c.ch}</span>
+                      <span style={evoStyles.before}>
+                        {c.before ? `[${c.before[0]}–${c.before[1]}]` : "[—]"}
+                      </span>
+                      <span style={evoStyles.arrow}>➔</span>
+                      <span style={{ ...evoStyles.after, color: c.changed ? "#2ecc71" : "#7f8c8d" }}>
+                        {c.after ? `[${c.after[0]}–${c.after[1]}]` : "[—]"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          )}
 
           {!loading && !error && calibStatus && (
             <>
