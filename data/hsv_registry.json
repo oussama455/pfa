@@ -1,0 +1,126 @@
+{
+  "ams_tunisia": {
+    "water": {
+      "h_min": 19.283099999999997,
+      "s_min": 24.128099999999996,
+      "v_min": 211.69532999999998,
+      "h_max": 41.85600399999999,
+      "s_max": 70.92566999999998,
+      "v_max": 253.04159999999996,
+      "layer_name": "water",
+      "map_series": "ams_tunisia",
+      "correction_count": 5,
+      "last_updated": 1779566964.4724264
+    },
+    "vegetation": {
+      "h_min": 40,
+      "s_min": 40,
+      "v_min": 50,
+      "h_max": 85,
+      "s_max": 255,
+      "v_max": 255,
+      "layer_name": "vegetation",
+      "map_series": "ams_tunisia",
+      "correction_count": 0,
+      "last_updated": 0.0
+    },
+    "contours": {
+      "h_min": 6,
+      "s_min": 40,
+      "v_min": 75,
+      "h_max": 25,
+      "s_max": 160,
+      "v_max": 215,
+      "layer_name": "contours",
+      "map_series": "ams_tunisia",
+      "correction_count": 0,
+      "last_updated": 0.0
+    },
+    "red_roads": {
+      "h_min": 0,
+      "s_min": 90,
+      "v_min": 70,
+      "h_max": 10,
+      "s_max": 255,
+      "v_max": 255,
+      "layer_name": "red_roads",
+      "map_series": "ams_tunisia",
+      "correction_count": 0,
+      "last_updated": 0.0
+    },
+    "buildings": {
+      "h_min": 0,
+      "s_min": 0,
+      "v_min": 30,
+      "h_max": 180,
+      "s_max": 50,
+      "v_max": 130,
+      "layer_name": "buildings",
+      "map_series": "ams_tunisia",
+      "correction_count": 0,
+      "last_updated": 0.0
+    }
+  },
+  "ams_algeria": {
+    "water": {
+      "h_min": 95,
+      "s_min": 60,
+      "v_min": 60,
+      "h_max": 130,
+      "s_max": 255,
+      "v_max": 255,
+      "layer_name": "water",
+      "map_series": "ams_algeria",
+      "correction_count": 0,
+      "last_updated": 0.0
+    },
+    "vegetation": {
+      "h_min": 40,
+      "s_min": 40,
+      "v_min": 50,
+      "h_max": 85,
+      "s_max": 255,
+      "v_max": 255,
+      "layer_name": "vegetation",
+      "map_series": "ams_algeria",
+      "correction_count": 0,
+      "last_updated": 0.0
+    },
+    "contours": {
+      "h_min": 6,
+      "s_min": 40,
+      "v_min": 75,
+      "h_max": 25,
+      "s_max": 160,
+      "v_max": 215,
+      "layer_name": "contours",
+      "map_series": "ams_algeria",
+      "correction_count": 0,
+      "last_updated": 0.0
+    },
+    "red_roads": {
+      "h_min": 0,
+      "s_min": 90,
+      "v_min": 70,
+      "h_max": 10,
+      "s_max": 255,
+      "v_max": 255,
+      "layer_name": "red_roads",
+      "map_series": "ams_algeria",
+      "correction_count": 0,
+      "last_updated": 0.0
+    },
+    "buildings": {
+      "h_min": 0,
+      "s_min": 0,
+      "v_min": 30,
+      "h_max": 180,
+      "s_max": 50,
+      "v_max": 130,
+      "layer_name": "buildings",
+      "map_series": "ams_algeria",
+      "correction_count": 0,
+      "last_updated": 0.0
+    }
+  }
+}

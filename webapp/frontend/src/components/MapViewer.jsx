@@ -459,7 +459,7 @@ const dlgStyles = {
 
 const ctrlStyles = {
   panel: {
-    position: "absolute", top: 80, left: 10, zIndex: 1000,
+    position: "absolute", top: 200, left: 10, zIndex: 1000,
     background: "rgba(15, 20, 30, 0.92)", color: "#ecf0f1",
     borderRadius: 8, padding: "10px 12px", minWidth: 240, maxWidth: 280,
     fontFamily: "'JetBrains Mono', monospace", fontSize: 11,

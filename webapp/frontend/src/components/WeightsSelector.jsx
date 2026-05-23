@@ -43,14 +43,13 @@ export default function WeightsSelector({
 
   return (
     <div className="weights-selector">
-      <label style={{ display: "block", marginBottom: 4, fontSize: 14 }}>
+      <label>
         Poids U-Net
         <button
           type="button"
           onClick={refresh}
           disabled={loading}
           title="Rafraichir la liste"
-          style={{ marginLeft: 8, fontSize: 11, padding: "2px 6px" }}
         >
           {loading ? "..." : "↻"}
         </button>
@@ -59,7 +58,6 @@ export default function WeightsSelector({
         value={value || ""}
         onChange={(e) => onChange(e.target.value || null)}
         disabled={disabled || loading}
-        style={{ width: "100%", padding: 6 }}
       >
         {includeNone && (
           <option value="">— Aucun (segmentation couleur seule) —</option>
