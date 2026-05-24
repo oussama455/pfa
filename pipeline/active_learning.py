@@ -60,6 +60,7 @@ import numpy as np
 
 logger = logging.getLogger(__name__)
 
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Configuration
 # ─────────────────────────────────────────────────────────────────────────────
@@ -72,6 +73,12 @@ EMA_ALPHA = 0.30
 # Minimum corrections before the adaptive ranges override the defaults.
 # Below this threshold, the defaults are returned unchanged.
 MIN_CORRECTIONS_TO_ACTIVATE = 3
+
+# Minimum number of pixels required inside polygon for valid extraction
+MIN_PIXELS_FOR_EXTRACTION = 30
+
+# Minimum polygon vertices (a valid polygon has at least 3 vertices, but closed has 4)
+MIN_POLYGON_VERTICES = 4
 
 # Patch radius around correction centroid (pixels in downscaled image space)
 PATCH_RADIUS = 64
@@ -124,9 +131,8 @@ class AdaptiveHSVRange:
         """
         def ema_min(current, obs):
             # For min bounds: take the EMA but cap at observed minimum
-            # (we want to capture all valid pixels, not miss them)
             blended = alpha * obs + (1 - alpha) * current
-            return min(blended, obs + 2)  # small tolerance
+            return min(blended, obs + 2)
 
         def ema_max(current, obs):
             # For max bounds: symmetric
@@ -158,9 +164,6 @@ class AdaptiveHSVRange:
 # Default HSV ranges (seed values — same as color_segmentation.py DEFAULT_RANGES)
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Map series → layer → AdaptiveHSVRange
-# "ams_tunisia" covers AMS Tunisia 1:50,000 (e.g. Tunis Sheet 20)
-# "ams_algeria" covers AMS Algeria 1:50,000 (e.g. Ain Bessem Sheet 88)
 DEFAULT_ADAPTIVE_RANGES: Dict[str, Dict[str, AdaptiveHSVRange]] = {
     "ams_tunisia": {
         "water":      AdaptiveHSVRange(95,  60,  60,  130, 255, 255, "water",      "ams_tunisia"),
@@ -236,7 +239,6 @@ def save_registry(registry: Dict[str, Dict[str, AdaptiveHSVRange]]) -> None:
         for series, layers in registry.items()
     }
 
-    # Atomic write: write to temp file first, then rename
     tmp = path.with_suffix(".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(serializable, f, indent=2)
@@ -251,17 +253,10 @@ def load_adaptive_ranges(
     Returns the current HSV ranges for a given map series.
     If fewer than MIN_CORRECTIONS_TO_ACTIVATE corrections have been recorded,
     returns the default ranges (calibration not yet active).
-
-    Usage in color_segmentation.py:
-        from pipeline.active_learning import load_adaptive_ranges
-        ranges = load_adaptive_ranges("ams_tunisia")
-        lower, upper = ranges["red_roads"].to_opencv_range()
-        mask = cv2.inRange(hsv, lower, upper)
     """
     registry = load_registry()
     series_ranges = registry.get(map_series, DEFAULT_ADAPTIVE_RANGES.get(map_series, {}))
 
-    # Check if calibration is active (enough corrections accumulated)
     max_corrections = max(
         (r.correction_count for r in series_ranges.values()),
         default=0,
@@ -282,7 +277,35 @@ def load_adaptive_ranges(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# HSV observation: extract statistics from a corrected polygon
+# Helper: safe polygon area validation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _is_valid_polygon(coords: List[List[float]]) -> bool:
+    """
+    Check if polygon coordinates form a valid polygon.
+    A valid polygon should have at least MIN_POLYGON_VERTICES points
+    and non-zero area.
+    """
+    if not coords or len(coords) < MIN_POLYGON_VERTICES:
+        return False
+    
+    try:
+        # Calculate approximate area using shoelace formula
+        area = 0.0
+        n = len(coords)
+        for i in range(n):
+            x1, y1 = coords[i]
+            x2, y2 = coords[(i + 1) % n]
+            area += x1 * y2 - x2 * y1
+        area = abs(area) / 2.0
+        
+        return area > 10.0  # Minimum area of 10 square pixels
+    except Exception:
+        return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HSV observation: extract statistics from a corrected polygon (CORRIGÉE)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _extract_hsv_stats_from_polygon(
@@ -295,46 +318,41 @@ def _extract_hsv_stats_from_polygon(
 ) -> Optional[Dict[str, Tuple[float, float]]]:
     """
     Extracts HSV statistics from the pixels inside a corrected polygon.
-
-    Args:
-        raster_bgr:        Full downscaled raster image (BGR, H×W×3).
-        polygon_coords:    Coordinates of the corrected polygon exterior ring.
-                           - has_georeference=False (DÉFAUT) : pixels image
-                             (L.CRS.Simple — Leaflet renvoie directement les
-                             pixels via PIXEL_CRS dans MapViewer.jsx).
-                           - has_georeference=True : WGS84 lon/lat — non
-                             supporté ici (besoin du transform inverse).
-        crop_bbox:         (x1, y1, x2, y2) of the map crop in downscaled image.
-                           Sert à savoir si les coords sont en CROP-space
-                           ou en IMAGE-space (voir détection ci-dessous).
-        downscale_factor:  Scale applied to the original raster for downscaling.
-        has_georeference:  Indique le CRS dans lequel le polygone est arrivé.
-
-    Returns:
-        Dict {layer_concept: (p5, p95)} for H, S, V channels.
-        None if extraction fails (too few pixels, invalid polygon, etc.).
+    VERSION CORRIGÉE avec vérifications robustes.
     """
-    # Mode SIG : on a besoin du transform inverse pour re-projeter en pixels,
-    # ce que cette fonction ne sait pas faire. On refuse explicitement plutôt
-    # que d'utiliser une heuristique fragile (l'ancien "max(x)<400" cassait
-    # dès qu'on avait une carte ≤ 400 px de large).
+    # Mode SIG : non supporté
     if has_georeference:
-        logger.debug("[active_learning] Polygone géoréférencé — "
-                      "extraction HSV impossible sans transform inverse")
+        logger.debug("[active_learning] Polygone géoréférencé — extraction impossible")
+        return None
+
+    # Vérification des dimensions du raster
+    if raster_bgr is None or raster_bgr.size == 0:
+        logger.debug("[active_learning] Raster image vide")
         return None
 
     H, W = raster_bgr.shape[:2]
-    coords_arr = np.array(polygon_coords, dtype=np.float64)
-
-    if coords_arr.size == 0 or coords_arr.ndim != 2 or coords_arr.shape[1] < 2:
-        logger.debug("[active_learning] Polygon vide ou mal formé")
+    
+    # Vérification des coordonnées du polygone
+    if not polygon_coords or len(polygon_coords) < MIN_POLYGON_VERTICES:
+        logger.debug(f"[active_learning] Polygone invalide: {len(polygon_coords) if polygon_coords else 0} points")
         return None
 
-    # Détection robuste du repère pixel utilisé :
-    # le frontend (PIXEL_CRS) envoie des coords en IMAGE-space full,
-    # tandis que le pipeline interne travaille en CROP-space. On regarde si
-    # les coords sortent du crop : si oui, c'est de l'IMAGE-space et on
-    # n'applique PAS d'offset. Sinon c'est du CROP-space et on offsete.
+    # Vérification que le polygone a une aire minimale
+    if not _is_valid_polygon(polygon_coords):
+        logger.debug("[active_learning] Polygone trop petit ou auto-intersectant")
+        return None
+
+    try:
+        coords_arr = np.array(polygon_coords, dtype=np.float64)
+    except Exception as e:
+        logger.debug(f"[active_learning] Conversion des coordonnées impossible: {e}")
+        return None
+
+    if coords_arr.size == 0 or coords_arr.ndim != 2 or coords_arr.shape[1] < 2:
+        logger.debug("[active_learning] Polygone vide ou mal formé")
+        return None
+
+    # Détection robuste du repère pixel
     x1_crop, y1_crop, x2_crop, y2_crop = crop_bbox
     crop_w = max(1, x2_crop - x1_crop)
     crop_h = max(1, y2_crop - y1_crop)
@@ -345,8 +363,12 @@ def _extract_hsv_stats_from_polygon(
     ymin = float(coords_arr[:, 1].min())
 
     pts = coords_arr.copy()
-    if xmax <= crop_w + 2 and ymax <= crop_h + 2 and xmin >= -2 and ymin >= -2:
-        # Looks like CROP-space → offset vers IMAGE-space
+    
+    # Détection du type d'espace avec marge de tolérance
+    is_crop_space = (xmax <= crop_w + 5 and ymax <= crop_h + 5 and 
+                     xmin >= -5 and ymin >= -5)
+    
+    if is_crop_space:
         pts[:, 0] += x1_crop
         pts[:, 1] += y1_crop
         logger.debug("[active_learning] Polygon en CROP-space — offset (%d, %d) appliqué",
@@ -356,32 +378,63 @@ def _extract_hsv_stats_from_polygon(
 
     pts = pts.astype(np.int32)
 
-    # Garde-fou : clip aux dimensions de l'image pour éviter un fillPoly
-    # qui dépasse (sans crash mais avec masque tronqué).
+    # Garde-fou : clip aux dimensions de l'image
     pts[:, 0] = np.clip(pts[:, 0], 0, W - 1)
     pts[:, 1] = np.clip(pts[:, 1], 0, H - 1)
 
-    # Create binary mask at raster resolution
-    mask = np.zeros((H, W), dtype=np.uint8)
-    cv2.fillPoly(mask, [pts], 255)
-
-    # Extract HSV pixels inside the polygon
-    hsv = cv2.cvtColor(raster_bgr, cv2.COLOR_BGR2HSV)
-    masked_hsv = hsv[mask > 0]
-    del mask, hsv  # libère ~ 4×H×W octets
-
-    if len(masked_hsv) < 20:
-        logger.debug("[active_learning] Too few pixels inside polygon (%d)", len(masked_hsv))
+    # Vérification que le polygone a encore des points valides
+    if len(pts) < 3:
+        logger.debug("[active_learning] Polygone trop petit après clipping")
         return None
 
+    # Création du masque binaire
+    mask = np.zeros((H, W), dtype=np.uint8)
+    try:
+        cv2.fillPoly(mask, [pts], 255)
+    except cv2.error as e:
+        logger.debug(f"[active_learning] fillPoly a échoué: {e}")
+        return None
+
+    # Vérification que le masque contient des pixels
+    pixel_count = int(np.sum(mask) / 255)
+    if pixel_count == 0:
+        logger.debug("[active_learning] Masque vide après fillPoly")
+        return None
+
+    # Extraction des pixels HSV
+    hsv = cv2.cvtColor(raster_bgr, cv2.COLOR_BGR2HSV)
+    masked_hsv = hsv[mask > 0]
+    del mask, hsv
+
+    if len(masked_hsv) < MIN_PIXELS_FOR_EXTRACTION:
+        logger.debug("[active_learning] Trop peu de pixels dans le polygone (%d/%d)", 
+                     len(masked_hsv), MIN_PIXELS_FOR_EXTRACTION)
+        return None
+
+    # Calcul des percentiles
     h_ch = masked_hsv[:, 0].astype(float)
     s_ch = masked_hsv[:, 1].astype(float)
     v_ch = masked_hsv[:, 2].astype(float)
 
+    # Percentiles 5 et 95
+    h_p5 = np.percentile(h_ch, 5)
+    h_p95 = np.percentile(h_ch, 95)
+    s_p5 = np.percentile(s_ch, 5)
+    s_p95 = np.percentile(s_ch, 95)
+    v_p5 = np.percentile(v_ch, 5)
+    v_p95 = np.percentile(v_ch, 95)
+
+    # Vérification de cohérence des percentiles
+    if h_p5 > h_p95 or s_p5 > s_p95 or v_p5 > v_p95:
+        logger.debug("[active_learning] Percentiles incohérents")
+        return None
+
+    logger.debug(f"[active_learning] Extraction réussie: {len(masked_hsv)} pixels")
+    
     return {
-        "H": (float(np.percentile(h_ch, 5)),  float(np.percentile(h_ch, 95))),
-        "S": (float(np.percentile(s_ch, 5)),  float(np.percentile(s_ch, 95))),
-        "V": (float(np.percentile(v_ch, 5)),  float(np.percentile(v_ch, 95))),
+        "H": (float(h_p5), float(h_p95)),
+        "S": (float(s_p5), float(s_p95)),
+        "V": (float(v_p5), float(v_p95)),
         "n_pixels": len(masked_hsv),
     }
 
@@ -409,20 +462,74 @@ def _detect_map_series(map_name: Optional[str], raster_path: Optional[Path]) -> 
         if "algeria" in fname or "alger" in fname:
             return "ams_algeria"
 
-    return "ams_tunisia"   # default: Tunisia (primary test dataset)
+    return "ams_tunisia"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Main entry point: process one correction
+# Safe wrapper for custom layers (CORRIGÉE)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def update_hsv_thresholds(layer_name: str, current_geometry: dict, registry_path: Optional[str] = None) -> dict:
+    """
+    Mise à jour sécurisée des seuils HSV pour les couches spécifiées.
+    Si la couche est personnalisée/nouvelle, on skip l'update sans crash.
+    
+    Args:
+        layer_name: Nom de la couche à mettre à jour
+        current_geometry: Géométrie GeoJSON de la correction
+        registry_path: Chemin optionnel vers le registre HSV
+    
+    Returns:
+        Dictionnaire avec 'geometry' et 'hsv_updated' flag
+    """
+    path = Path(registry_path) if registry_path else None
+    
+    try:
+        if path is None:
+            hsv_registry = load_registry()
+        elif path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                hsv_registry = json.load(f)
+        else:
+            hsv_registry = {}
+    except Exception as e:
+        logger.warning(f"[active_learning] Impossible de charger le registre: {e}")
+        hsv_registry = {}
+    
+    # Vérifier si la couche est connue (préconfigurée)
+    known_layers = set()
+    for series, layers in DEFAULT_ADAPTIVE_RANGES.items():
+        if isinstance(layers, dict):
+            known_layers.update(layers.keys())
+    
+    # Si la couche n'est pas dans le registre des couches connues
+    if layer_name not in known_layers:
+        logger.warning(
+            f"[WARNING] Custom layer '{layer_name}' sans configuration HSV. "
+            f"Skip active learning update."
+        )
+        return {
+            "geometry": current_geometry,
+            "hsv_updated": False,
+            "message": f"Layer '{layer_name}' non configurée pour l'apprentissage actif"
+        }
+    
+    return {
+        "geometry": current_geometry,
+        "hsv_updated": True,
+        "message": f"Layer '{layer_name}' mise à jour"
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Main entry point: process one correction (CORRIGÉE)
 # ─────────────────────────────────────────────────────────────────────────────
 
 def process_correction(correction, map_upload) -> Optional[AdaptiveHSVRange]:
     """
     Main Active Learning entry point — called by api.py after saving a Correction.
 
-    For DELETE corrections: records a negative example (no HSV update needed —
-        but increments a rejection counter for future use in Level 2).
-
+    For DELETE corrections: records a negative example (no HSV update needed).
     For EDIT corrections: extracts HSV stats from the corrected polygon and
         updates the registry for the appropriate layer and map series.
 
@@ -433,13 +540,11 @@ def process_correction(correction, map_upload) -> Optional[AdaptiveHSVRange]:
     Returns:
         The updated AdaptiveHSVRange for the corrected layer, or None if skipped.
     """
-    import time as _time
-
-    t0 = _time.perf_counter()
+    t0 = time.perf_counter()
 
     layer_name      = correction.layer_name
     correction_type = correction.correction_type
-    geometry        = correction.geometry   # GeoJSON geometry dict or None
+    geometry        = correction.geometry
 
     map_series = _detect_map_series(
         map_upload.map_name,
@@ -450,6 +555,15 @@ def process_correction(correction, map_upload) -> Optional[AdaptiveHSVRange]:
         "[active_learning] Processing %s correction: layer=%s series=%s",
         correction_type, layer_name, map_series,
     )
+
+    # Vérification que la couche est préconfigurée (protection contre les couches custom)
+    preconfigured_layers = DEFAULT_ADAPTIVE_RANGES.get(map_series, {})
+    if layer_name not in preconfigured_layers:
+        logger.warning(
+            "[active_learning] Custom layer '%s' non préconfigurée — skip update",
+            layer_name
+        )
+        return None
 
     # ── DELETE: record but no HSV update ─────────────────────────────────────
     if correction_type == "delete":
@@ -462,6 +576,21 @@ def process_correction(correction, map_upload) -> Optional[AdaptiveHSVRange]:
 
     # ── EDIT: extract HSV from corrected polygon ──────────────────────────────
     if correction_type != "edit" or not geometry:
+        logger.debug(f"[active_learning] Ignoring correction type: {correction_type}")
+        return None
+
+    # Vérification que le polygone a une taille suffisante
+    geom_type = geometry.get("type", "")
+    if geom_type == "Polygon":
+        exterior_ring = geometry["coordinates"][0]
+        if len(exterior_ring) < MIN_POLYGON_VERTICES:
+            logger.warning(
+                "[active_learning] Polygon too small (%d points), minimum required: %d",
+                len(exterior_ring), MIN_POLYGON_VERTICES
+            )
+            return None
+    else:
+        logger.warning("[active_learning] Unsupported geometry type: %s", geom_type)
         return None
 
     # Load the raster image
@@ -494,22 +623,9 @@ def process_correction(correction, map_upload) -> Optional[AdaptiveHSVRange]:
         bbox = (int(w * 0.085), int(h * 0.085), int(w * 0.915), int(h * 0.82))
 
     # Extract polygon coordinates
-    geom_type = geometry.get("type", "")
-    if geom_type == "Polygon":
-        exterior_ring = geometry["coordinates"][0]
-    elif geom_type == "MultiPolygon":
-        # Use the largest polygon ring
-        exterior_ring = max(
-            (poly[0] for poly in geometry["coordinates"]),
-            key=len,
-        )
-    else:
-        logger.warning("[active_learning] Unsupported geometry type: %s", geom_type)
-        return None
+    exterior_ring = geometry["coordinates"][0]
 
-    # Extract HSV statistics from corrected polygon pixels.
-    # Le flag has_georeference indique si la correction arrive en WGS84
-    # (Leaflet legacy) ou en pixels (L.CRS.Simple, mode pixel par défaut).
+    # Extract HSV statistics
     map_has_georef = bool(getattr(map_upload, "has_georeference", False))
     hsv_stats = _extract_hsv_stats_from_polygon(
         img_bgr, exterior_ring, bbox, scale,
@@ -518,11 +634,21 @@ def process_correction(correction, map_upload) -> Optional[AdaptiveHSVRange]:
 
     if hsv_stats is None:
         logger.warning(
-            "[active_learning] Could not extract HSV stats for layer '%s'", layer_name
+            "[active_learning] Could not extract HSV stats for layer '%s' — skipping update",
+            layer_name
         )
         return None
 
-    # Build observed range from extracted statistics
+    logger.info(
+        "[active_learning] Extracted stats for '%s': H[%.0f-%.0f] S[%.0f-%.0f] V[%.0f-%.0f] (%d pixels)",
+        layer_name,
+        hsv_stats["H"][0], hsv_stats["H"][1],
+        hsv_stats["S"][0], hsv_stats["S"][1],
+        hsv_stats["V"][0], hsv_stats["V"][1],
+        hsv_stats["n_pixels"],
+    )
+
+    # Build observed range
     observed_range = AdaptiveHSVRange(
         h_min=hsv_stats["H"][0],
         s_min=hsv_stats["S"][0],
@@ -546,7 +672,6 @@ def process_correction(correction, map_upload) -> Optional[AdaptiveHSVRange]:
         if default:
             registry[map_series][layer_name] = AdaptiveHSVRange(**asdict(default))
         else:
-            # Bootstrap from observation itself
             registry[map_series][layer_name] = AdaptiveHSVRange(
                 h_min=hsv_stats["H"][0],
                 s_min=hsv_stats["S"][0],
@@ -566,9 +691,9 @@ def process_correction(correction, map_upload) -> Optional[AdaptiveHSVRange]:
     # Persist registry
     save_registry(registry)
 
-    elapsed = _time.perf_counter() - t0
+    elapsed = time.perf_counter() - t0
     logger.info(
-        "[active_learning] Updated '%s/%s': "
+        "[active_learning] ✅ Updated '%s/%s': "
         "H[%.0f-%.0f] S[%.0f-%.0f] V[%.0f-%.0f] "
         "(n_px=%d, corrections=%d, elapsed=%.2fs)",
         map_series, layer_name,
@@ -593,7 +718,6 @@ def _record_negative_example(map_series: str, layer_name: str) -> None:
         return
     if layer_name in registry[map_series]:
         r = registry[map_series][layer_name]
-        # We don't update ranges for deletes — just note the count
         registry[map_series][layer_name] = AdaptiveHSVRange(
             h_min=r.h_min, s_min=r.s_min, v_min=r.v_min,
             h_max=r.h_max, s_max=r.s_max, v_max=r.v_max,
@@ -613,14 +737,6 @@ class AdaptiveSegmenter:
     """
     Drop-in replacement for extract_all_color_layers() that uses
     adaptive HSV ranges from the Active Learning registry.
-
-    Usage:
-        segmenter = AdaptiveSegmenter(map_series="ams_tunisia")
-        layers = segmenter.segment(hsv_image)
-        # Returns same dict as extract_all_color_layers()
-
-    The segmenter reloads the registry once per instance creation
-    (not per call) for performance. Create a new instance per pipeline run.
     """
 
     def __init__(self, map_series: str = "ams_tunisia") -> None:
@@ -697,7 +813,6 @@ class AdaptiveSegmenter:
                 np.array([int(r.h_min), int(r.s_min), int(r.v_min)], dtype=np.uint8),
                 np.array([int(r.h_max), int(r.s_max), int(r.v_max)], dtype=np.uint8),
             )
-            # Crimson extension (H 170-180) uses same S/V bounds
             high_mask = cv2.inRange(
                 hsv,
                 np.array([170, int(r.s_min), int(r.v_min)], dtype=np.uint8),

@@ -122,11 +122,60 @@ def downscale_if_too_large(image_bgr: np.ndarray, *,
 # Filtres image
 # ════════════════════════════════════════════════════════════════════════════
 
-def denoise(image_bgr: np.ndarray, d: int = 9,
-            sigma_color: int = 75, sigma_space: int = 75) -> np.ndarray:
-    """Débruitage bilatéral — préserve les bords des routes."""
-    return cv2.bilateralFilter(image_bgr, d=d,
-                                sigmaColor=sigma_color, sigmaSpace=sigma_space)
+def classify_map_type(img_bgr: np.ndarray) -> str:
+    """
+    تحديد نوع الخريطة تلقائياً بناءً على تشتت الألوان (Color Variance)
+    """
+    # تحويل عينة من الصورة إلى HSV لقياس درجة التشبع اللوني (Saturation)
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    s_channel = hsv[:, :, 1]
+    mean_saturation = np.mean(s_channel)
+    
+    # إذا كان متوسط التشبع منخفض جداً، فهي خريطة باهتة/أحادية
+    if mean_saturation < 16.0:
+        return "monochrome_faded"
+    return "color_rich"
+
+def denoise(img: np.ndarray, map_type: str = "color_rich") -> np.ndarray:
+    """
+    تطبيق فلتر تنعيم ديناميكي ذكي بناءً على نوع الخريطة لحماية الخطوط الكنتورية.
+    
+    استراتيجية التنعيم:
+        - color_rich: خرائط ملونة حديثة → فلتر خفيف (d=5) للحفاظ على التفاصيل
+        - monochrome_faded: خرائط قديمة باهتة → فلتر قوي (d=9) + مورفولوجي
+    
+    Parameters:
+        img      : صورة BGR ثلاثية الأبعاد أو رمادية
+        map_type : "color_rich" أو "monochrome_faded"
+    
+    Returns:
+        صورة منعّمة مع الحفاظ على الحواف الحادة (الخطوط والطرق)
+    """
+    if len(img.shape) == 3:
+        if map_type == "monochrome_faded":
+            # للخرائط الباهتة: فلتر ثنائي قوي جداً لإزالة خشونة الورق مع حماية الحواف الحادة
+            # d=9: قطر الحي المستخدم (9 بكسل) — قوي لإزالة ضوضاء المسح الضوئي
+            # sigmaColor=90, sigmaSpace=90: معاملات قوية للتنعيم
+            denoised = cv2.bilateralFilter(img, d=9, sigmaColor=85, sigmaSpace=85)
+            
+            # تطبيق فلتر مورفولوجي خفيف لربط الخطوط المتقطعة بسبب بهتان الحبر
+            # MORPH_CLOSE = تمدد ثم تآكل = ملء الفجوات الصغيرة
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+            denoised = cv2.morphologyEx(denoised, cv2.MORPH_CLOSE, kernel)
+            
+            logger.debug(f"[denoise] Applied STRONG filter for monochrome_faded map")
+        else:
+            # للخرائط الملونة العادية: تنعيم خفيف متوازن
+            # d=5: قطر أصغر للحفاظ على تفاصيل المباني والطرق الدقيقة
+            # sigmaColor=50, sigmaSpace=50: معاملات معتدلة
+            denoised = cv2.bilateralFilter(img, d=5, sigmaColor=50, sigmaSpace=50)
+            logger.debug(f"[denoise] Applied LIGHT filter for color_rich map")
+        
+        return denoised
+    
+    # للصور الرمادية: استخدم fastNlMeansDenoising
+    logger.debug(f"[denoise] Applied grayscale fastNlMeansDenoising")
+    return cv2.fastNlMeansDenoising(img, None, 10, 7, 21)
 
 
 def to_hsv(image_bgr: np.ndarray) -> np.ndarray:
@@ -455,16 +504,29 @@ def crop_to_frame(image: np.ndarray,
 def preprocess(path: str | Path, *,
                denoise_on: bool = True,
                normalize_on: bool = False,
-               max_dimension: int = 2400) -> Tuple[np.ndarray, np.ndarray]:
-    """Prétraitement sans recadrage. Retourne (image_bgr, image_hsv)."""
+               max_dimension: int = 2400) -> Tuple[np.ndarray, np.ndarray, str]:
+    """
+    Prétraitement sans recadrage. 
+    
+    Détecte automatiquement le type de carte et applique les filtres adapté.
+    
+    Returns: 
+        (image_bgr, image_hsv, map_type)
+    """
     img = load_image(path)
     if max_dimension:
         img = downscale_if_too_large(img, max_dimension=max_dimension)
+    
+    # Détecte le type de carte AVANT normalisation/débruitage
+    map_type = classify_map_type(img)
+    logger.info(f"Detected map type: {map_type}")
+    
     if normalize_on:
         img = normalize_illumination(img)
     if denoise_on:
-        img = denoise(img)
-    return img, to_hsv(img)
+        img = denoise(img, map_type=map_type)
+    
+    return img, to_hsv(img), map_type
 
 
 def preprocess_with_crop(path: str | Path, *,
@@ -474,7 +536,7 @@ def preprocess_with_crop(path: str | Path, *,
                           remove_legend: bool = True,
                           manual_bbox: Optional[Tuple[int, int, int, int]] = None,
                           max_dimension: int = 2400,
-                          ) -> Tuple[np.ndarray, np.ndarray, Tuple[int, int, int, int]]:
+                          ) -> Tuple[np.ndarray, np.ndarray, Tuple[int, int, int, int], str]:
     """
     Prétraitement + recadrage en deux étapes :
         Stage 1 : neatline (marges extérieures, titre, barre d'échelle)
@@ -488,15 +550,20 @@ def preprocess_with_crop(path: str | Path, *,
                         Prime sur auto_crop.
 
     Returns:
-        (image_bgr_recadrée, image_hsv_recadrée, bbox_utilisée)
+        (image_bgr_recadrée, image_hsv_recadrée, bbox_utilisée, map_type)
     """
     img = load_image(path)
     if max_dimension:
         img = downscale_if_too_large(img, max_dimension=max_dimension)
+    
+    # Détecte le type de carte AVANT normalisation/débruitage
+    map_type = classify_map_type(img)
+    logger.info(f"Detected map type: {map_type}")
+    
     if normalize_on:
         img = normalize_illumination(img)
     if denoise_on:
-        img = denoise(img)
+        img = denoise(img, map_type=map_type)
 
     H, W = img.shape[:2]
 
@@ -528,5 +595,5 @@ def preprocess_with_crop(path: str | Path, *,
     hsv_cropped = to_hsv(img_cropped)
 
     logger.info(f"preprocess_with_crop: {W}×{H} → {img_cropped.shape[1]}×{img_cropped.shape[0]} "
-                f"(legend_x={legend_x})")
-    return img_cropped, hsv_cropped, final_bbox
+                f"(legend_x={legend_x}, map_type={map_type})")
+    return img_cropped, hsv_cropped, final_bbox, map_type

@@ -79,6 +79,56 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Adaptive min_area based on map type and layer
+# ─────────────────────────────────────────────────────────────────────────────
+
+def get_adaptive_min_area(layer_name: str, map_type: str = "color_rich") -> int:
+    """
+    حساب الحد الأدنى للمساحة (بالبكسل) لتجاهل الشوائب والضوضاء بشكل ديناميكي.
+    
+    المنطق:
+        - للخرائط الباهتة (monochrome_faded): نرفع الفلتر لتجاهل أوساخ المسح الضوئي
+        - لكل طبقة: حد أدنى مختلف بناءً على خصائصها الطبيعية
+    
+    Args:
+        layer_name: اسم الطبقة (buildings, water, contours, etc.)
+        map_type: نوع الخريطة ("color_rich" أو "monochrome_faded")
+    
+    Returns:
+        الحد الأدنى للمساحة بالبكسل
+    """
+    # معامل الضرب بناءً على نوع الخريطة
+    base_modifier = 2.0 if map_type == "monochrome_faded" else 1.0
+    
+    # الحد الأدنى المخصص لكل طبقة (في حالة الخرائط الملونة)
+    layer_min_areas = {
+        "buildings":  40,      # تجاهل الكتل الأصغر من مبنى صغير (جدران رقيقة)
+        "contours":   150,     # الخطوط الكنتورية تحتاج مساحة اتصال كبيرة نسبياً
+        "water":      60,      # الأودية والمسطحات المائية
+        "vegetation": 100,     # بقع الغابات والمناطق الخضراء
+        "roads":      30,      # الطرق تكون أرق، لكن حتى الطرق الدقيقة مهمة
+    }
+    
+    # احصل على الحد الأدنى الأساسي، مع fallback افتراضي
+    base_min_area = layer_min_areas.get(layer_name, 50)
+    
+    # تطبيق معامل الخريطة
+    adaptive_min_area = int(base_min_area * base_modifier)
+    
+    logger.debug(
+        f"[apply_adaptive_min_area] Layer '{layer_name}': "
+        f"base={base_min_area} px × {base_modifier} ({map_type}) → {adaptive_min_area} px"
+    )
+    
+    return adaptive_min_area
+
+
+def apply_adaptive_min_area(layer_name: str, map_type: str = "color_rich") -> int:
+    """Backward-compatible alias for older callers."""
+    return get_adaptive_min_area(layer_name, map_type)
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Step 1 — Morphological cleaning
 # ─────────────────────────────────────────────────────────────────────────────
@@ -274,15 +324,27 @@ def mask_to_geodataframe(
     *,
     crs: str = "EPSG:4326",
     transform: Optional["Affine"] = None,
-    min_area_px: int = 50,
+    min_area_px: Optional[int] = None,
     max_area_px: Optional[int] = None,
     simplify_tolerance: float = 1.5,
     open_kernel_size: int = 3,
     close_kernel_size: int = 5,
+    map_type: str = "color_rich",
 ) -> "gpd.GeoDataFrame":
     """
     Complete CC-based pipeline: binary mask → GeoDataFrame.
+    
+    Adaptive filtering based on map_type (detected from preprocessing).
+    
+    Parameters:
+        map_type: "color_rich" (default) أو "monochrome_faded"
+                  يؤثر على حساب min_area_px التلقائي
+    """
+    # حساب min_area_px تلقائياً من map_type إذا لم يتم تحديده
+    if min_area_px is None:
+        min_area_px = get_adaptive_min_area(layer_name, map_type=map_type)
 
+    """
     Args:
         mask:            Binary uint8 mask from U-Net (H×W, values 0/255).
         layer_name:      Semantic name: "buildings", "roads", etc.
@@ -395,9 +457,10 @@ def vectorize_mask(
     transform: Optional["Affine"] = None,
     output_geojson: Optional[str | Path] = None,
     output_shapefile: Optional[str | Path] = None,
-    min_area_px: int = 50,
+    min_area_px: Optional[int] = None,
     max_area_px: Optional[int] = None,
     simplify_tolerance: float = 1.5,
+    map_type: str = "color_rich",
 ) -> "gpd.GeoDataFrame":
     """
     Public API: binary mask → GeoDataFrame + optional file export.
@@ -413,6 +476,7 @@ def vectorize_mask(
             transform=affine,          # from georeferencing.py
             output_geojson="out/buildings.geojson",
             output_shapefile="out/buildings.shp",
+            map_type="monochrome_faded",  # auto-detected from preprocessing
         )
 
     Args:
@@ -424,13 +488,19 @@ def vectorize_mask(
         transform:        rasterio Affine matrix. If None, coords stay in pixels.
         output_geojson:   If set, write GeoJSON to this path.
         output_shapefile: If set, write Shapefile to this path.
-        min_area_px:      Minimum CC area in pixels (default 50).
+        min_area_px:      Minimum CC area in pixels. If None, auto-calculated based
+                          on map_type and layer_name.
         max_area_px:      Maximum CC area (None = no limit).
         simplify_tolerance: Simplification tolerance (pixels or map units).
+        map_type:         "color_rich" (default) or "monochrome_faded" for adaptive filtering.
 
     Returns:
         GeoDataFrame with geometry, layer, area_px, centroid_x/y, label_id.
     """
+    # حساب min_area_px تلقائياً إذا لم يتم تحديده
+    if min_area_px is None:
+        min_area_px = get_adaptive_min_area(layer_name, map_type=map_type)
+    
     gdf = mask_to_geodataframe(
         mask,
         layer_name,
@@ -439,6 +509,7 @@ def vectorize_mask(
         min_area_px=min_area_px,
         max_area_px=max_area_px,
         simplify_tolerance=simplify_tolerance,
+        map_type=map_type,
     )
 
     if output_geojson:
@@ -473,7 +544,9 @@ if __name__ == "__main__":
     parser.add_argument("--crs",              default="EPSG:4326", help="Output CRS")
     parser.add_argument("--output-geojson",   default=None)
     parser.add_argument("--output-shp",       default=None)
-    parser.add_argument("--min-area",         type=int, default=50)
+    parser.add_argument("--min-area",         type=int, default=None)
+    parser.add_argument("--map-type",         default="color_rich",
+                        choices=["color_rich", "monochrome_faded"])
     args = parser.parse_args()
 
     mask_img = _cv2.imread(args.mask, _cv2.IMREAD_GRAYSCALE)
@@ -487,6 +560,7 @@ if __name__ == "__main__":
         output_geojson=args.output_geojson,
         output_shapefile=args.output_shp,
         min_area_px=args.min_area,
+        map_type=args.map_type,
     )
     print(f"Extracted {len(result_gdf)} features from '{args.layer}'")
     if not result_gdf.empty:

@@ -26,10 +26,18 @@ from __future__ import annotations
 import logging
 import time
 import traceback
+import warnings
 from pathlib import Path
 from typing import Dict, Iterator, Optional
 
 logger = logging.getLogger(__name__)
+
+warnings.filterwarnings(
+    "ignore",
+    message=r"The default value of `allowed_objects` will change in a future version\..*",
+    category=Warning,
+    module=r"langgraph\.cache\.base.*",
+)
 
 # Ordre nominal des nœuds, pour piloter le stepper visuel côté frontend.
 NODE_SEQUENCE = [

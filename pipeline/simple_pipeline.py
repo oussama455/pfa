@@ -77,7 +77,7 @@ def run_simple_pipeline(
 
     if verbose:
         print(f"[1/3] Prétraitement : {input_path.name}")
-    image_bgr, image_hsv, _bbox = prep.preprocess_with_crop(
+    image_bgr, image_hsv, _bbox, _map_type = prep.preprocess_with_crop(
         input_path,
         auto_crop=True,
         remove_legend=remove_legend,

@@ -83,6 +83,88 @@ _CALIBRATED_RED_HIGH = colseg.HSVRange(h_min=155, s_min=60, v_min=60,
                                         h_max=180, s_max=255, v_max=255)
 
 
+# ════════════════════════════════════════════════════════════════════════════
+# Adaptive QA thresholds based on detected map type
+# ════════════════════════════════════════════════════════════════════════════
+
+@dataclass
+class AdaptiveQAThresholds:
+    """معايير QA ديناميكية حسب نوع الخريطة."""
+    qa_threshold: float                    # دقة QA المستهدفة (%)
+    max_allowed_layer_ratio: float         # أعلى نسبة تغطية طبقة واحدة (%)
+    min_acceptable_confidence: float       # الحد الأدنى للثقة المقبولة (%)
+    max_iterations: int                    # أقصى عدد تكرارات للتصحيح الذاتي
+
+
+def get_adaptive_qa_thresholds(map_type: str) -> AdaptiveQAThresholds:
+    """
+    حساب معايير QA ديناميكية بناءً على نوع الخريطة المكتشف.
+    
+    منطق:
+        - Monochrome/Faded: معايير مرنة (خرائط قديمة صعبة الفهم من الآلة)
+        - Color/Rich: معايير صارمة (خرائط حديثة واضحة)
+    """
+    if map_type == "monochrome_faded":
+        return AdaptiveQAThresholds(
+            qa_threshold=74.0,              # الخرائط القديمة يصعب وصولها لـ 90%
+            max_allowed_layer_ratio=91.0,   # تسامح أعلى مع عدم التوازن
+            min_acceptable_confidence=45.0, # قبول ثقة منخفضة نسبياً
+            max_iterations=3,               # تكرارات قليلة لتجنب الإفراط
+        )
+    else:  # color_rich
+        return AdaptiveQAThresholds(
+            qa_threshold=90.0,              # الخرائط الملونة الحديثة
+            max_allowed_layer_ratio=85.0,   # معايير أصارم
+            min_acceptable_confidence=55.0, # معايير أعلى
+            max_iterations=5,               # تكرارات أكثر للوصول للجودة
+        )
+
+
+def calculate_layer_coverage_stats(masks: Dict[str, np.ndarray]) -> Dict[str, float]:
+    """
+    حساب نسبة تغطية كل طبقة بالنسبة للصورة الكلية.
+    
+    Returns:
+        dict: {layer_name: coverage_percent}
+    """
+    stats = {}
+    for name, mask in masks.items():
+        if mask is None:
+            stats[name] = 0.0
+        else:
+            total_pixels = mask.size
+            active_pixels = np.count_nonzero(mask)
+            stats[name] = (active_pixels / total_pixels) * 100.0 if total_pixels > 0 else 0.0
+    return stats
+
+
+def calculate_max_layer_ratio(coverage_stats: Dict[str, float]) -> float:
+    """حساب أعلى نسبة تغطية بين الطبقات."""
+    return max(coverage_stats.values()) if coverage_stats else 0.0
+
+
+def calculate_confidence_score(coverage_stats: Dict[str, float], 
+                              qa_threshold: float) -> float:
+    """
+    حساب درجة ثقة عامة بناءً على توازن الطبقات.
+    
+    منطق:
+        - إذا كانت إحدى الطبقات تغطي >90% → ثقة منخفضة (عدم توازن = إفراط تقسيم)
+        - إذا كانت الطبقات متوازنة → ثقة عالية
+    """
+    if not coverage_stats:
+        return 0.0
+    
+    max_ratio = max(coverage_stats.values())
+    avg_ratio = sum(coverage_stats.values()) / len(coverage_stats)
+    
+    # درجة توازن: كلما قل الفرق بين أعلى طبقة والمتوسط، كلما كانت الثقة أعلى
+    balance_score = 100.0 - abs(max_ratio - avg_ratio)
+    
+    return max(0.0, min(100.0, balance_score))
+
+
+
 def _apply_transform_to_geom(geom, transform):
     from shapely.ops import transform as shapely_transform
     def fn(xs, ys):
@@ -173,7 +255,7 @@ def run_pipeline(input_path: str | Path,
     # 1) Prétraitement + recadrage (Stage 1 neatline + Stage 2 légende)
     if verbose:
         print(f"[1/5] Prétraitement : {input_path.name}")
-    image_bgr, image_hsv, crop_bbox = prep.preprocess_with_crop(
+    image_bgr, image_hsv, crop_bbox, detected_map_type = prep.preprocess_with_crop(
         input_path,
         auto_crop=auto_crop,
         remove_legend=remove_legend,
@@ -184,6 +266,8 @@ def run_pipeline(input_path: str | Path,
         H_crop, W_crop = image_bgr.shape[:2]
         print(f"      Cadre cartographique : {W_crop}×{H_crop} px")
         print(f"      Légende supprimée    : {remove_legend}")
+        print(f"      Type de carte détecté: {detected_map_type}")
+
 
     # ── Réalignement pixel : calcule offset (crop) + scale (downscale) ───────
     # En mode pixel, les masques sont en espace ROGNÉ + DOWNSCALÉ. Pour que
@@ -220,6 +304,21 @@ def run_pipeline(input_path: str | Path,
     if verbose:
         for name, mask in color_masks.items():
             print(f"      {name:12s} → {colseg.coverage_percent(mask):5.1f}%")
+    
+    # ── Calcul des statistiques QA adaptatives ──────────────────────────────
+    # Basé sur le type de carte détecté, on charge les seuils appropriés
+    qa_thresholds = get_adaptive_qa_thresholds(detected_map_type)
+    layer_coverage = calculate_layer_coverage_stats(color_masks)
+    max_layer_ratio = calculate_max_layer_ratio(layer_coverage)
+    confidence_score = calculate_confidence_score(layer_coverage, qa_thresholds.qa_threshold)
+    
+    if verbose:
+        print(f"[QA] Thresholds adaptés pour '{detected_map_type}':")
+        print(f"      QA Target           : {qa_thresholds.qa_threshold:.1f}%")
+        print(f"      Max Layer Ratio     : {qa_thresholds.max_allowed_layer_ratio:.1f}%")
+        print(f"      Min Acceptable Conf : {qa_thresholds.min_acceptable_confidence:.1f}%")
+        print(f"      Current Confidence  : {confidence_score:.1f}%")
+        print(f"      Max Layer Dominance : {max_layer_ratio:.1f}%")
 
     # 3) Segmentation sémantique (optionnelle) — auto-detection des classes
     semantic_masks: Dict[str, np.ndarray] = {}

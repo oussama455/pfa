@@ -1,0 +1,12 @@
+{
+    "serverpulse.ai.enabled": true,
+    "serverpulse.ai.optInShown": true,
+    "serverpulse.services": [
+        {
+            "name": "webapp (django)",
+            "type": "django",
+            "port": 8000,
+
+        }
+    ]
+}

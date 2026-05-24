@@ -122,6 +122,10 @@ class AgentState(TypedDict, total=False):
     raw_masks: Dict[str, np.ndarray]    # {layer_name: binary_mask}
     confidence_score: float             # 0.0 – 1.0 composite quality score
     raw_geojsons: List[Dict]            # list of GeoJSON dicts (one per layer)
+    previous_confidence_score: float
+    best_confidence_score: float
+    best_raw_masks: Dict[str, np.ndarray]
+    best_raw_geojsons: List[Dict]
 
     # ── QA ───────────────────────────────────────────────────────────────────
     qa_passed: bool
@@ -579,8 +583,19 @@ def _masks_to_raw_geojsons(masks: Dict[str, np.ndarray],
 # Node 4 — QA / Self-Correction
 # ─────────────────────────────────────────────────────────────────────────────
 
-_QA_THRESHOLD = 0.90    # 90% confidence required to pass
+_QA_THRESHOLD = 0.90    # default confidence required to pass
 _MAX_RETRIES = 2        # maximum self-correction attempts
+
+
+def _adaptive_qa_limits(map_type: str) -> tuple[float, float, float]:
+    """Return (target, min_confidence, max_layer_ratio) for the map type."""
+    if map_type in {"monochrome", "monochrome_faded"}:
+        return 0.74, 0.45, 0.91
+    return _QA_THRESHOLD, 0.55, 0.85
+
+
+def _copy_masks(masks: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
+    return {name: mask.copy() for name, mask in masks.items()}
 
 
 def node_qa_check(state: AgentState) -> Dict:
@@ -599,10 +614,28 @@ def node_qa_check(state: AgentState) -> Dict:
 
     score = state.get("confidence_score", 0.0)
     raw_geojsons = state.get("raw_geojsons", [])
+    raw_masks = state.get("raw_masks", {})
     retry_count = state.get("retry_count", 0)
+    map_type = state.get("map_type", "stratégique")
+    qa_threshold, min_confidence, max_allowed_layer_ratio = _adaptive_qa_limits(map_type)
+    previous_score = state.get("previous_confidence_score")
+    best_score = state.get("best_confidence_score")
+    best_masks = state.get("best_raw_masks")
+    best_geojsons = state.get("best_raw_geojsons")
+
+    best_update: Dict[str, Any] = {}
+    if best_score is None or score > best_score:
+        best_score = score
+        best_masks = _copy_masks(raw_masks)
+        best_geojsons = list(raw_geojsons)
+        best_update = {
+            "best_confidence_score": best_score,
+            "best_raw_masks": best_masks,
+            "best_raw_geojsons": best_geojsons,
+        }
 
     # ── Check 1: confidence threshold ────────────────────────────────────────
-    passes_threshold = score >= _QA_THRESHOLD
+    passes_threshold = score >= qa_threshold
 
     # ── Check 2: at least one layer has features ─────────────────────────────
     total_features = sum(len(gj.get("features", [])) for gj in raw_geojsons)
@@ -612,16 +645,54 @@ def node_qa_check(state: AgentState) -> Dict:
     layer_counts = [len(gj.get("features", [])) for gj in raw_geojsons]
     if total_features > 0:
         max_ratio = max(layer_counts) / total_features
-        no_oversegmentation = max_ratio <= 0.80
+        no_oversegmentation = max_ratio <= max_allowed_layer_ratio
     else:
+        max_ratio = 0.0
         no_oversegmentation = False
 
     qa_passed = passes_threshold and has_features and no_oversegmentation
 
+    confidence_regressed = previous_score is not None and score < previous_score
+    collapse_detected = (
+        score < min_confidence
+        or (total_features > 0 and max_ratio >= max_allowed_layer_ratio)
+    )
+    if (confidence_regressed or collapse_detected) and best_masks is not None and best_geojsons is not None:
+        reason = (
+            f"confidence regressed from {previous_score:.2%} to {score:.2%}"
+            if confidence_regressed
+            else f"numeric collapse detected: confidence={score:.2%}, max_layer_ratio={max_ratio:.2%}"
+        )
+        qa_feedback = f"{reason}; restored best previous output"
+        log_entry.update({
+            "confidence_score": round(score, 4),
+            "restored_confidence_score": round(best_score or score, 4),
+            "total_features": total_features,
+            "qa_passed": True,
+            "qa_feedback": qa_feedback,
+            "retry_count": retry_count,
+            "map_type": map_type,
+            "qa_threshold": qa_threshold,
+            "min_confidence": min_confidence,
+            "max_allowed_layer_ratio": max_allowed_layer_ratio,
+        })
+        logger.warning("[qa_check] %s; restoring best score %.3f",
+                       reason, best_score or score)
+        return {
+            "raw_masks": best_masks,
+            "raw_geojsons": best_geojsons,
+            "confidence_score": best_score or score,
+            "qa_passed": True,
+            "qa_feedback": qa_feedback,
+            "previous_confidence_score": best_score or score,
+            "agent_log": state.get("agent_log", []) + [log_entry],
+            **best_update,
+        }
+
     # ── Feedback message ──────────────────────────────────────────────────────
     feedback_parts = []
     if not passes_threshold:
-        feedback_parts.append(f"confidence {score:.2%} < threshold {_QA_THRESHOLD:.0%}")
+        feedback_parts.append(f"confidence {score:.2%} < threshold {qa_threshold:.0%}")
     if not has_features:
         feedback_parts.append("no features detected in any layer")
     if not no_oversegmentation and total_features > 0:
@@ -635,6 +706,10 @@ def node_qa_check(state: AgentState) -> Dict:
         "qa_passed": qa_passed,
         "qa_feedback": qa_feedback,
         "retry_count": retry_count,
+        "map_type": map_type,
+        "qa_threshold": qa_threshold,
+        "min_confidence": min_confidence,
+        "max_allowed_layer_ratio": max_allowed_layer_ratio,
     })
     logger.info("[qa_check] passed=%s  score=%.3f  feedback='%s'",
                 qa_passed, score, qa_feedback)
@@ -642,7 +717,9 @@ def node_qa_check(state: AgentState) -> Dict:
     return {
         "qa_passed": qa_passed,
         "qa_feedback": qa_feedback,
+        "previous_confidence_score": score,
         "agent_log": state.get("agent_log", []) + [log_entry],
+        **best_update,
     }
 
 
@@ -674,6 +751,7 @@ def node_self_correct(state: AgentState) -> Dict:
     score = state.get("confidence_score", 0.0)
     retry_count = state.get("retry_count", 0)
     feedback = state.get("qa_feedback", "")
+    map_type = state.get("map_type", "stratégique")
 
     corrections_applied = []
 
@@ -689,15 +767,21 @@ def node_self_correct(state: AgentState) -> Dict:
         corrections_applied.append("clahe_4.0 + bilateral_strong")
 
     elif score < 0.50 or "confidence" in feedback:
+        if map_type in {"monochrome", "monochrome_faded"}:
+            img = cv2.bilateralFilter(img, d=5, sigmaColor=45, sigmaSpace=45)
+            k = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+            img = cv2.morphologyEx(img, cv2.MORPH_CLOSE, k)
+            corrections_applied.append("gentle_bilateral_5 + morph_close_2x2")
+        else:
         # Boost color saturation in HSV space
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
-        hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.4, 0, 255)  # +40% saturation
-        hsv[:, :, 2] = np.clip(hsv[:, :, 2] * 1.1, 0, 255)  # +10% brightness
-        img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
-        # Sharpening kernel
-        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
-        img = cv2.filter2D(img, -1, kernel)
-        corrections_applied.append("saturation_boost_1.4 + sharpen")
+            hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV).astype(np.float32)
+            hsv[:, :, 1] = np.clip(hsv[:, :, 1] * 1.4, 0, 255)  # +40% saturation
+            hsv[:, :, 2] = np.clip(hsv[:, :, 2] * 1.1, 0, 255)  # +10% brightness
+            img = cv2.cvtColor(hsv.astype(np.uint8), cv2.COLOR_HSV2BGR)
+            # Sharpening kernel
+            kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]])
+            img = cv2.filter2D(img, -1, kernel)
+            corrections_applied.append("saturation_boost_1.4 + sharpen")
 
     elif "over-segmentation" in feedback:
         # Morphological opening to remove salt-and-pepper noise

@@ -171,6 +171,7 @@ export default function AgentChat({
         }
 
         case "agent_response":
+          closedCleanly = true;
           setFinalMsg(pkt);
           setActiveNode(null);
           setMaxPhaseReached(NODE_PHASES.length - 1);
@@ -182,6 +183,7 @@ export default function AgentChat({
           if (pkt.geojson_url && typeof onGeoJsonReady === "function") {
             onGeoJsonReady(pkt.geojson_url);
           }
+          es.close();
           break;
 
         case "error":

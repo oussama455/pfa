@@ -21,6 +21,11 @@ def _sse(packet: dict) -> str:
     return f"data: {json.dumps(packet, ensure_ascii=False)}\n\n"
 
 
+def _sse_retry(milliseconds: int) -> str:
+    """Set EventSource reconnect delay; this stream is an expensive one-shot run."""
+    return f"retry: {milliseconds}\n\n"
+
+
 def agent_stream_view(request: HttpRequest) -> StreamingHttpResponse:
     """
     Vue Django standard (SANS DRF) pour diffuser en SSE
@@ -34,6 +39,7 @@ def agent_stream_view(request: HttpRequest) -> StreamingHttpResponse:
     upload = get_object_or_404(MapUpload, pk=map_id) if map_id else None
 
     def event_stream():
+        yield _sse_retry(3_600_000)
         yield _sse({"type": "open", "thread_id": thread_id,
                     "map_id": int(map_id) if map_id else None})
 
