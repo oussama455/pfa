@@ -13,7 +13,7 @@ vectorielles GeoJSON exploitables dans QGIS.
 
 ---
 
-## Mode SIMPLE (niveau 2e annee geomatique)
+## Mode SIMPLE 
 
 Le coeur du projet tient en 5 etapes faciles a comprendre :
 
